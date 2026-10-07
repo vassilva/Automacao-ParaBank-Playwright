@@ -37,11 +37,12 @@ def banner(String title, Map fields) {
 // Runs one suite against one environment and validates it against its approved count.
 // Reports go to reports/<environment>/<suite>, so QA/UAT and Smoke/Regression never overwrite
 // each other.
-def runSuite(String environment, String suite, String expected) {
+def runSuite(String environment, String suite, String expected, String baseUrl = '') {
   def dir = "reports/${environment}/${suite}"
+  def url = baseUrl ?: "http://parabank-${environment}-parabank-1:8080/parabank/"
   withEnv([
     "TARGET_ENV=${environment}",
-    "PARABANK_BASE_URL=http://parabank-${environment}-parabank-1:8080/parabank/",
+    "PARABANK_BASE_URL=${url}",
     "REPORTS_DIR=${dir}",
   ]) {
     sh "npm run test:${suite}"
@@ -69,6 +70,11 @@ pipeline {
       name: 'ADDITIONAL_QA_SUITE',
       choices: ['none', 'sanity', 'full'],
       description: 'Run an extra suite on QA after the QA Smoke gate (manual or release use).'
+    )
+    choice(
+      name: 'GATE_DRILL',
+      choices: ['none', 'fail-uat-smoke'],
+      description: 'MAIN only, for proving the deployment gate: fail-uat-smoke runs UAT Smoke against an unreachable port of the UAT container, so Smoke fails for real (transport errors) and UAT Regression must not run. Changes no test and no environment.'
     )
   }
 
@@ -173,6 +179,7 @@ pipeline {
               npm run format:check
               npm run typecheck
               npm run test:dry-run
+              npm run -s audit:test-data
               npm run -s ci:coverage -- --suite smoke --expect "$SMOKE_EXPECTED"
               npm run -s ci:coverage -- --suite regression --expect "$REGRESSION_EXPECTED"
               npm run -s ci:coverage -- --suite sanity --expect "$SANITY_EXPECTED"
@@ -304,7 +311,13 @@ pipeline {
           }
           steps {
             script {
-              runSuite('uat', 'smoke', env.SMOKE_EXPECTED)
+              def drillUrl = ''
+              if (params.GATE_DRILL == 'fail-uat-smoke') {
+                // Nothing listens on port 1: every scenario fails at transport level, for real.
+                drillUrl = 'http://parabank-uat-parabank-1:1/parabank/'
+                banner('GATE DRILL', ['UAT SMOKE TARGET': drillUrl, 'EXPECTED': 'Smoke fails; UAT Regression is not executed; build FAILURE'])
+              }
+              runSuite('uat', 'smoke', env.SMOKE_EXPECTED, drillUrl)
               env.UAT_SMOKE_PASSED = 'true'
             }
           }
