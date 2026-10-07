@@ -1,8 +1,8 @@
 name: ParaBank BDD
 
+# Manual only: Jenkins (Jenkinsfile) is the CI/CD and reacts to every push and pull request.
+# Running this on the same events would duplicate every validation.
 on:
-  pull_request:
-  push:
   workflow_dispatch:
 
 permissions:

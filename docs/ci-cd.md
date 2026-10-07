@@ -23,27 +23,50 @@ DEPLOY UAT ─> UAT READY ─> SMOKE ──fail──> STOP (build FAILED, Regre
                             pass ──> SUCCESS
 ```
 
+## Repository, branches and triggers
+
+- **Repository:** https://github.com/vassilva/Automacao-ParaBank-Playwright (public; `main` is the
+  default branch).
+- **Branches:** `main` is the stable integration branch and the only branch that deploys to UAT.
+  Work happens on `feature/*` branches and reaches `main` through a Pull Request.
+- **Jenkins job:** Multibranch Pipeline `Automacao-ParaBank-Playwright` (GitHub Branch Source,
+  credential `github-app-qa-automation`, the GitHub App "Jenkins QA Automation" installed on the
+  repository). The local Jenkins is not reachable from GitHub, so it **scans the repository every
+  2 minutes** instead of receiving webhooks; a push is picked up by the next scan.
+- **Discovery:** branches, _excluding branches that are also filed as PRs_; PRs from the
+  repository itself, built as the PR _merged with its target branch_. A branch with an open PR is
+  therefore built once (as the PR), never twice.
+
+| Event                                     | Jenkins build           | Test plan                                                              | UAT? |
+| ----------------------------------------- | ----------------------- | ---------------------------------------------------------------------- | :--: |
+| Push to a `feature/*` branch without a PR | branch job (PUSH)       | quality gates, build image, deploy QA, QA Smoke (4)                    |  no  |
+| PR opened / updated (from this repo)      | `PR-<n>` (PULL REQUEST) | the above + QA Regression (24), on the PR merged with `main`           |  no  |
+| Merge into (or push to) `main`            | `main` (MAIN)           | QA Smoke, promote the same image ID to UAT, UAT Smoke → UAT Regression | yes  |
+
+A Pull Request never deploys to UAT: unmerged code is validated on QA only. Recommended GitHub
+setting (not configured automatically): protect `main` so that changes arrive through PRs.
+
 ## Stages, in execution order
 
-| #   | Stage               | PUSH | PR  | MAIN | What it does                                                                                                  |
-| --- | ------------------- | :--: | :-: | :--: | ------------------------------------------------------------------------------------------------------------- |
-| 1   | Build Context       |  ✓   |  ✓  |  ✓   | Build mode (`CHANGE_ID` → PR; `PARABANK_MAIN_BRANCH`, default `main` → MAIN; otherwise PUSH), build image tag |
-| 2   | Workspace Guard     |  ✓   |  ✓  |  ✓   | Clean `reports/`, `build/`, `deployment/`; refuse a `.env`; require 1 worker and 0 retries                    |
-| 3   | Install             |  ✓   |  ✓  |  ✓   | `npm ci`                                                                                                      |
-| 4   | Quality Gates       |  ✓   |  ✓  |  ✓   | lint, format, typecheck, dry run; **approved suite sizes**: Smoke 4, Regression 24, Sanity 10, Full 52        |
-| 5   | Acquire Host Lock   |  ✓   |  ✓  |  ✓   | One pipeline at a time on the shared QA/UAT host (see Concurrency)                                            |
-| 6   | Build Image         |  ✓   |  ✓  |  ✓   | **The only build**: pinned source commit, ParaBank's own 239 tests, OCI labels; records `IMAGE_ID`            |
-| 7   | Deploy QA           |  ✓   |  ✓  |  ✓   | `env deploy qa <IMAGE_ID>`: fresh `parabank-qa` container (fresh database) from the image ID                  |
-| 8   | QA Ready            |  ✓   |  ✓  |  ✓   | Container healthy + application serving + database initialized; QA runs exactly `IMAGE_ID`                    |
-| 9   | QA Smoke            |  ✓   |  ✓  |  ✓   | `test:smoke`, then 4/4 executed once and passed                                                               |
-| 10  | QA Regression       |  –   |  ✓  |  –   | Only after QA Smoke passed: `test:regression`, then 24/24                                                     |
-| 11  | QA Additional Suite | opt  | opt | opt  | Parameter `ADDITIONAL_QA_SUITE` = `sanity` (10) or `full` (52), after QA Smoke                                |
-| 12  | Promote to UAT      |  –   |  –  |  ✓   | `env deploy uat <QA image ID>` (refused unless QA image ID = built image ID); **no rebuild**                  |
-| 13  | UAT Ready           |  –   |  –  |  ✓   | Container healthy + application serving + database initialized; **identity gate**: built = QA = UAT image ID  |
-| 14  | UAT Smoke           |  –   |  –  |  ✓   | The deployment gate: `test:smoke`, then 4/4                                                                   |
-| 15  | UAT Regression      |  –   |  –  |  ✓   | Only after UAT Smoke passed (`UAT_SMOKE_PASSED`): `test:regression`, then 24/24                               |
-| 16  | Known Defects       |  –   |  –  | opt  | Parameter `RUN_KNOWN_DEFECTS`: the 25 known-defect scenarios on UAT; result at most UNSTABLE, never FAILED    |
-| 17  | Deployment Record   |  –   |  –  |  ✓   | `deployment/deployment-record.txt`: source commit, built/QA/UAT image IDs, validation counts                  |
+| #   | Stage               | PUSH | PR  | MAIN | What it does                                                                                                            |
+| --- | ------------------- | :--: | :-: | :--: | ----------------------------------------------------------------------------------------------------------------------- |
+| 1   | Build Context       |  ✓   |  ✓  |  ✓   | Build mode (`CHANGE_ID` → PR; `PARABANK_MAIN_BRANCH`, default `main` → MAIN; otherwise PUSH), build image tag           |
+| 2   | Workspace Guard     |  ✓   |  ✓  |  ✓   | Clean `reports/`, `build/`, `deployment/`; refuse a `.env`; require 1 worker and 0 retries                              |
+| 3   | Install             |  ✓   |  ✓  |  ✓   | `npm ci`                                                                                                                |
+| 4   | Quality Gates       |  ✓   |  ✓  |  ✓   | lint, format, typecheck, dry run, test-data audit; **approved suite sizes**: Smoke 4, Regression 24, Sanity 10, Full 52 |
+| 5   | Acquire Host Lock   |  ✓   |  ✓  |  ✓   | One pipeline at a time on the shared QA/UAT host (see Concurrency)                                                      |
+| 6   | Build Image         |  ✓   |  ✓  |  ✓   | **The only build**: pinned source commit, ParaBank's own 239 tests, OCI labels; records `IMAGE_ID`                      |
+| 7   | Deploy QA           |  ✓   |  ✓  |  ✓   | `env deploy qa <IMAGE_ID>`: fresh `parabank-qa` container (fresh database) from the image ID                            |
+| 8   | QA Ready            |  ✓   |  ✓  |  ✓   | Container healthy + application serving + database initialized; QA runs exactly `IMAGE_ID`                              |
+| 9   | QA Smoke            |  ✓   |  ✓  |  ✓   | `test:smoke`, then 4/4 executed once and passed                                                                         |
+| 10  | QA Regression       |  –   |  ✓  |  –   | Only after QA Smoke passed: `test:regression`, then 24/24                                                               |
+| 11  | QA Additional Suite | opt  | opt | opt  | Parameter `ADDITIONAL_QA_SUITE` = `sanity` (10) or `full` (52), after QA Smoke                                          |
+| 12  | Promote to UAT      |  –   |  –  |  ✓   | `env deploy uat <QA image ID>` (refused unless QA image ID = built image ID); **no rebuild**                            |
+| 13  | UAT Ready           |  –   |  –  |  ✓   | Container healthy + application serving + database initialized; **identity gate**: built = QA = UAT image ID            |
+| 14  | UAT Smoke           |  –   |  –  |  ✓   | The deployment gate: `test:smoke`, then 4/4                                                                             |
+| 15  | UAT Regression      |  –   |  –  |  ✓   | Only after UAT Smoke passed (`UAT_SMOKE_PASSED`): `test:regression`, then 24/24                                         |
+| 16  | Known Defects       |  –   |  –  | opt  | Parameter `RUN_KNOWN_DEFECTS`: the 25 known-defect scenarios on UAT; result at most UNSTABLE, never FAILED              |
+| 17  | Deployment Record   |  –   |  –  |  ✓   | `deployment/deployment-record.txt`: source commit, built/QA/UAT image IDs, validation counts                            |
 
 ## Why Regression can never run after a failed Smoke
 
@@ -132,14 +155,22 @@ with one worker and no retries (checked by the Workspace Guard).
 
 ## Configuration
 
-| Item                   | Default | Meaning                                                  |
-| ---------------------- | ------- | -------------------------------------------------------- |
-| `PARABANK_MAIN_BRANCH` | `main`  | Global property: builds of this branch promote to UAT    |
-| `RUN_KNOWN_DEFECTS`    | `false` | Build parameter (MAIN): run the known defects on UAT     |
-| `ADDITIONAL_QA_SUITE`  | `none`  | Build parameter: `sanity` or `full` on QA after QA Smoke |
+| Item                   | Default | Meaning                                                              |
+| ---------------------- | ------- | -------------------------------------------------------------------- |
+| `PARABANK_MAIN_BRANCH` | `main`  | Global property: builds of this branch promote to UAT                |
+| `RUN_KNOWN_DEFECTS`    | `false` | Build parameter (MAIN): run the known defects on UAT                 |
+| `ADDITIONAL_QA_SUITE`  | `none`  | Build parameter: `sanity` or `full` on QA after QA Smoke             |
+| `GATE_DRILL`           | `none`  | Build parameter (MAIN): `fail-uat-smoke` proves the gate (see below) |
 
 Agent requirements: a Docker-capable Jenkins with the Docker Pipeline plugin and access to the
 host Docker socket; host ports 8090 and 8091 free for QA and UAT.
+
+## Gate drill (proving the gate in Jenkins)
+
+`GATE_DRILL=fail-uat-smoke` (MAIN builds only, default `none`) runs UAT Smoke against a port of the
+UAT container on which nothing listens. Every Smoke scenario then fails for real, at transport
+level, without changing any test or either environment, and the build must end FAILED with UAT
+Regression not executed. Run a normal build afterwards to leave UAT validated again.
 
 ## Validation status
 
