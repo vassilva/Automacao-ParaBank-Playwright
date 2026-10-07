@@ -1,36 +1,46 @@
 // Jenkins CI/CD for the ParaBank BDD project (Playwright + TypeScript + Cucumber).
-// One Jenkinsfile, one Multibranch Pipeline; the build event selects the lifecycle:
+// One Jenkinsfile, one Multibranch Pipeline. The mandatory sequence is:
 //
-//   PULL REQUEST (CI)  Quality Gates -> Build Image -> Deploy QA -> QA Ready -> QA Smoke (4)
+//   Pull Request -> QA Smoke (4) -> required Jenkins check passes -> manual GitHub merge
+//   -> QA Regression (24) -> manual Jenkins approval -> UAT deployment -> UAT Smoke (4)
+//
+//   PULL REQUEST (CI)  Build and QA:   Quality Gates -> Build Image -> Deploy QA -> QA Ready
+//                                      -> QA Smoke (4). No Regression, no UAT. This build's
+//                                      result is the "Jenkins" check that GitHub requires.
 //   PUSH (branch)      same as PULL REQUEST (a branch with an open PR is built as the PR only)
-//   MAIN (CD)          Quality Gates -> Build Image -> Deploy QA -> QA Ready -> QA Regression (24)
-//                      -> Promote to UAT -> UAT Ready -> UAT Smoke (4)
-//                      [-> Known Defects (optional, never gating)] -> Deployment Record
-//
-// Test sequence: PR Smoke -> merge -> QA Regression -> UAT deployment -> UAT Smoke. Regression
-// validates the newly built application on QA before anything reaches UAT; a PR never deploys
-// to UAT; the main pipeline runs no QA Smoke and no UAT Regression.
+//   MAIN (CD)          Build and QA:   Quality Gates -> Build Image -> Deploy QA -> QA Ready
+//                                      -> QA Regression (24). No QA Smoke.
+//                      UAT Approval:   mandatory input by an authorized approver (no agent, no
+//                                      lock held while waiting); reject or timeout -> ABORTED,
+//                                      nothing deployed to UAT.
+//                      UAT Deployment: Verify Approved Image -> Promote to UAT (same image ID)
+//                                      -> UAT Ready -> UAT Smoke (4) [-> Known Defects, optional]
+//                                      -> Deployment Record. No UAT Regression.
 //
 // BUILD ONCE, PROMOTE THE SAME IMAGE: ParaBank is built once per pipeline from the pinned official
 // source commit (docker/parabank/source.env), with its own 239 tests. QA and UAT run that image by
 // image ID (never by a mutable tag); the identity gate fails the promotion unless the image ID UAT
-// runs equals the image ID QA validated, which equals the image ID that was built.
+// runs equals the image ID QA Regression validated, which equals the image ID that was built.
 //
 // QA (port 8090) and UAT (port 8091) are the persistent "parabank-qa" and "parabank-uat" Compose
 // environments on the Jenkins Docker host (src/support/environments.ts): separate containers and
 // databases. A deployment recreates the environment's container (fresh database) from the image.
 //
-// GATES: stages run in sequence; a failed suite fails its stage and the build, and every later
-// stage is skipped. Promotion additionally requires the QA Regression stage's own success flag,
-// set only after the suite and its count check both passed. Each suite run is validated against
-// its approved count (scripts/ci/verify-suite-coverage.ts).
+// GATES: stages run in sequence; a failed suite or count check fails its stage and the build, and
+// every later stage is skipped. In addition, each later step requires the previous gate's own
+// success flag: approval requires QA_REGRESSION_PASSED, the UAT deployment requires UAT_APPROVED
+// (set only after the approver was checked), and the deployment record requires UAT_SMOKE_PASSED.
 //
 // Cucumber runs with ONE worker and no retries everywhere: ParaBank registration is not
-// concurrency-safe (docs/qa-coverage.md). HOST LOCK: QA and UAT are shared by every job, so the
-// whole build/deploy/test part holds a host-wide lock (scripts/ci/host-lock.ts), released in post.
+// concurrency-safe (docs/qa-coverage.md). HOST LOCK: QA and UAT are shared by every job, so each
+// agent stage that builds, deploys or tests holds a host-wide lock (scripts/ci/host-lock.ts),
+// released in its post section; it is never held while waiting for approval.
 //
-// Optional Jenkins-level setting (Manage Jenkins -> System -> Global properties):
-//   PARABANK_MAIN_BRANCH  branch whose builds promote to UAT (default: main)
+// Jenkins-level settings (Manage Jenkins -> System -> Global properties -> Environment variables):
+//   PARABANK_UAT_APPROVERS         REQUIRED for MAIN: comma-separated Jenkins user IDs allowed to
+//                                  approve UAT deployments. Unset or empty: no UAT deployment.
+//   PARABANK_UAT_APPROVAL_MINUTES  approval timeout (default 60); expiry -> ABORTED, no deployment
+//   PARABANK_MAIN_BRANCH           branch whose builds are the CD pipeline (default: main)
 
 def banner(String title, Map fields) {
   def lines = ['========================================', title, '========================================']
@@ -52,6 +62,24 @@ def runSuite(String environment, String suite, String expected, String baseUrl =
   ]) {
     sh "npm run test:${suite}"
     sh "npm run -s ci:coverage -- --suite ${suite} --expect ${expected} ${dir}"
+  }
+}
+
+// Removes this build's image tag where no agent workspace exists any more (approval rejected,
+// timed out or aborted). The controller has the Docker CLI and the host socket. The image itself
+// is kept while QA still runs it; only the build's tag goes away.
+def removeBuildImageTag() {
+  if (!env.IMAGE_TAG) {
+    return
+  }
+  timeout(time: 5, unit: 'MINUTES') {
+    node('built-in') {
+      sh '''
+        if docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+          docker image rm "$IMAGE_TAG"
+        fi
+      '''
+    }
   }
 }
 
@@ -79,7 +107,7 @@ pipeline {
     choice(
       name: 'GATE_DRILL',
       choices: ['none', 'fail-qa-regression', 'fail-uat-smoke'],
-      description: 'MAIN only, proves a deployment gate without changing any test or environment: fail-qa-regression runs QA Regression, fail-uat-smoke runs UAT Smoke, against an unreachable port of that container, so the suite fails for real (transport errors). Expected: build FAILURE; with fail-qa-regression nothing is deployed to UAT.'
+      description: 'MAIN only, proves a deployment gate without changing any test or environment: fail-qa-regression runs QA Regression, fail-uat-smoke runs UAT Smoke, against an unreachable port of that container, so the suite fails for real (transport errors). Expected: build FAILURE; with fail-qa-regression no approval is requested and nothing is deployed to UAT.'
     )
   }
 
@@ -121,9 +149,9 @@ pipeline {
           def tagHash = ((env.BUILD_TAG ?: "local-${env.BUILD_NUMBER}").hashCode() & 0x7fffffff) % 100000
           env.IMAGE_TAG = "parabank-ci:${branchPart}-${env.BUILD_NUMBER}-${tagHash}"
           def plan = [
-            'PUSH'        : 'QA: Smoke (no UAT)',
-            'PULL REQUEST': 'QA: Smoke (no Regression, no UAT)',
-            'MAIN'        : 'QA: Regression (gate) -> promote same image -> UAT: Smoke',
+            'PUSH'        : 'QA: Smoke (no Regression, no UAT)',
+            'PULL REQUEST': 'QA: Smoke (no Regression, no UAT) -> required check for merge',
+            'MAIN'        : 'QA: Regression (gate) -> manual approval -> promote same image -> UAT: Smoke',
           ][env.BUILD_MODE]
           banner('PARABANK PIPELINE', [
             'BUILD MODE'      : env.BUILD_MODE,
@@ -140,7 +168,7 @@ pipeline {
       }
     }
 
-    stage('Build, Deploy and Validate') {
+    stage('Build and QA') {
       agent {
         dockerfile {
           dir 'docker/ci-agent'
@@ -241,7 +269,8 @@ pipeline {
           }
         }
 
-        // CI (pull requests and branch pushes): the candidate image must pass Smoke on QA.
+        // CI (pull requests and branch pushes): the candidate image must pass Smoke on QA. For a
+        // pull request, this build's result is the required "Jenkins" check on GitHub.
         stage('QA Smoke') {
           when {
             expression { env.BUILD_MODE != 'MAIN' }
@@ -254,8 +283,8 @@ pipeline {
           }
         }
 
-        // CD (main): the deployment gate. Nothing reaches UAT unless the newly built image passes
-        // the whole Regression suite on QA.
+        // CD (main): the deployment gate. No approval is even requested unless the newly built
+        // image passes the whole Regression suite on QA.
         stage('QA Regression') {
           when {
             expression { env.BUILD_MODE == 'MAIN' }
@@ -266,7 +295,7 @@ pipeline {
               if (params.GATE_DRILL == 'fail-qa-regression') {
                 // Nothing listens on port 1: every scenario fails at transport level, for real.
                 drillUrl = 'http://parabank-qa-parabank-1:1/parabank/'
-                banner('GATE DRILL', ['QA REGRESSION TARGET': drillUrl, 'EXPECTED': 'Regression fails; nothing is promoted to UAT; build FAILURE'])
+                banner('GATE DRILL', ['QA REGRESSION TARGET': drillUrl, 'EXPECTED': 'Regression fails; no approval, nothing deployed to UAT; build FAILURE'])
               }
               runSuite('qa', 'regression', env.REGRESSION_EXPECTED, drillUrl)
               env.QA_REGRESSION_PASSED = 'true'
@@ -286,37 +315,167 @@ pipeline {
             }
           }
         }
+      }
+
+      post {
+        always {
+          junit testResults: 'reports/qa/**/cucumber-junit.xml', allowEmptyResults: true
+          script {
+            if (fileExists('node_modules')) {
+              // QA stays running (persistent environment). Its log is saved redacted and the agent
+              // is detached from its network.
+              sh 'npm run -s env -- teardown qa --keep-running || true'
+            }
+            // Human-readable pointer; identity is always the image ID.
+            if (env.QA_IMAGE_ID) {
+              sh 'docker tag "$QA_IMAGE_ID" parabank-qa:current'
+            }
+            // The build's tag survives only while this image may still be approved for UAT.
+            def awaitingApproval = env.BUILD_MODE == 'MAIN' && env.QA_REGRESSION_PASSED == 'true'
+            if (!awaitingApproval) {
+              sh '''
+                if docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+                  docker image rm "$IMAGE_TAG"
+                fi
+              '''
+            }
+            if (fileExists('node_modules')) {
+              sh 'npm run -s ci:lock -- release "$BUILD_TAG"'
+            }
+          }
+          // Traces are never produced in CI; reports and logs are redacted (docs/ci-cd.md).
+          archiveArtifacts artifacts: 'reports/**, build/**', allowEmptyArchive: true
+        }
+      }
+    }
+
+    // No agent, no workspace and no host lock while waiting for a human. Only the Jenkins users in
+    // PARABANK_UAT_APPROVERS may approve; the approver is checked again after the input (Jenkins
+    // administrators can answer any input). Reject, timeout or abort -> ABORTED: no UAT stage runs.
+    stage('UAT Approval') {
+      agent none
+      when {
+        beforeAgent true
+        expression { env.BUILD_MODE == 'MAIN' && env.QA_REGRESSION_PASSED == 'true' }
+      }
+      steps {
+        script {
+          def approvers = (env.PARABANK_UAT_APPROVERS ?: '').split(',').collect { it.trim() }.findAll { it }
+          if (approvers.isEmpty()) {
+            error('UAT approval is not configured: set the Jenkins global property PARABANK_UAT_APPROVERS to the Jenkins user ID(s) allowed to approve. Nothing is deployed to UAT.')
+          }
+          def minutes = (env.PARABANK_UAT_APPROVAL_MINUTES ?: '60') as Integer
+          banner('UAT APPROVAL REQUIRED', [
+            'IMAGE ID'        : env.IMAGE_ID,
+            'SOURCE COMMIT'   : env.SOURCE_COMMIT,
+            'QA VALIDATION'   : "regression ${env.REGRESSION_EXPECTED}/${env.REGRESSION_EXPECTED} passed",
+            'APPROVERS'       : approvers.join(', '),
+            'TIMEOUT (MINUTES)': minutes,
+          ])
+          def answer = null
+          timeout(time: minutes, unit: 'MINUTES') {
+            answer = input(
+              id: 'ApproveUatDeployment',
+              message: "QA Regression passed (${env.REGRESSION_EXPECTED}/${env.REGRESSION_EXPECTED}) for image ${env.IMAGE_ID}. Deploy this exact image to UAT and run UAT Smoke?",
+              ok: 'Deploy to UAT',
+              submitter: approvers.join(','),
+              submitterParameter: 'APPROVER'
+            )
+          }
+          // With only submitterParameter the step returns the approver's user ID (a Map on some
+          // plugin versions); either way it is checked against the allow-list again.
+          def approver = ((answer instanceof Map) ? answer.APPROVER : answer)?.toString()?.trim() ?: ''
+          if (!approvers.contains(approver)) {
+            error("'${approver}' is not an authorized UAT approver (PARABANK_UAT_APPROVERS). Nothing is deployed to UAT.")
+          }
+          env.UAT_APPROVER = approver
+          env.UAT_APPROVED = 'true'
+          echo "UAT deployment approved by ${approver}"
+        }
+      }
+    }
+
+    stage('UAT Deployment') {
+      agent {
+        dockerfile {
+          dir 'docker/ci-agent'
+          filename 'Dockerfile'
+          args '--ipc=host -v /var/run/docker.sock:/var/run/docker.sock'
+        }
+      }
+      when {
+        beforeAgent true
+        expression { env.BUILD_MODE == 'MAIN' && env.UAT_APPROVED == 'true' }
+      }
+      // Includes a bounded wait (60 min) for the host lock.
+      options { timeout(time: 120, unit: 'MINUTES') }
+
+      stages {
+        stage('UAT Workspace Guard') {
+          steps {
+            sh '''
+              set -eu
+              # Only this stage's own results are published from here.
+              rm -rf reports/uat deployment
+              test "$CUCUMBER_PARALLEL" = "1"
+              test "$CUCUMBER_RETRY" = "0"
+            '''
+          }
+        }
+
+        stage('UAT Install') {
+          steps {
+            sh 'npm ci'
+          }
+        }
+
+        stage('UAT Host Lock') {
+          steps {
+            sh 'npm run -s ci:lock -- acquire "$BUILD_TAG"'
+          }
+        }
+
+        // The image approved is the image QA Regression validated: same ID, still present, built
+        // from the pinned commit.
+        stage('Verify Approved Image') {
+          steps {
+            sh '''
+              set -eu
+              test -n "$IMAGE_ID"
+              test "$IMAGE_ID" = "$QA_IMAGE_ID"
+              docker image inspect "$IMAGE_ID" >/dev/null
+              revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_ID")
+              test "$revision" = "$SOURCE_COMMIT"
+              echo "Approved image $IMAGE_ID (revision $revision), validated by QA Regression, approved by $UAT_APPROVER"
+            '''
+          }
+        }
 
         // PROMOTE: the very same image ID QA Regression validated, never a rebuild.
         stage('Promote to UAT') {
-          when {
-            expression { env.BUILD_MODE == 'MAIN' && env.QA_REGRESSION_PASSED == 'true' }
-          }
           steps {
             script {
-              if (env.QA_IMAGE_ID != env.IMAGE_ID) {
-                error("QA runs ${env.QA_IMAGE_ID}, but the build produced ${env.IMAGE_ID}: refusing to promote")
-              }
-              sh 'npm run -s env -- deploy uat "$QA_IMAGE_ID"'
+              sh 'npm run -s env -- deploy uat "$IMAGE_ID"'
               env.UAT_IMAGE_ID = sh(returnStdout: true, script: 'docker container inspect --format "{{.Image}}" parabank-uat-parabank-1').trim()
             }
           }
         }
 
         stage('UAT Ready') {
-          when {
-            expression { env.BUILD_MODE == 'MAIN' && env.UAT_IMAGE_ID != null && env.UAT_IMAGE_ID != '' }
-          }
           steps {
             script {
               sh 'npm run -s env -- health uat --wait'
-              // Identity gate: built == QA == UAT, read from Docker metadata.
-              sh 'npm run -s env -- identity --same --expect "$IMAGE_ID"'
+              // Identity gate: UAT runs exactly the built (and QA-validated, approved) image ID.
+              sh 'npm run -s env -- identity uat --expect "$IMAGE_ID"'
+              if (env.UAT_IMAGE_ID != env.IMAGE_ID) {
+                error("IMAGE IDENTITY MISMATCH: UAT runs ${env.UAT_IMAGE_ID}, approved ${env.IMAGE_ID}")
+              }
               banner('IMAGE IDENTITY', [
-                'SOURCE COMMIT': env.SOURCE_COMMIT,
-                'BUILT IMAGE ID': env.IMAGE_ID,
-                'QA IMAGE ID'  : env.QA_IMAGE_ID,
-                'UAT IMAGE ID' : env.UAT_IMAGE_ID,
+                'SOURCE COMMIT'    : env.SOURCE_COMMIT,
+                'BUILT IMAGE ID'   : env.IMAGE_ID,
+                'QA VALIDATED ID'  : env.QA_IMAGE_ID,
+                'UAT IMAGE ID'     : env.UAT_IMAGE_ID,
+                'APPROVED BY'      : env.UAT_APPROVER,
               ])
               env.UAT_READY = 'true'
             }
@@ -327,7 +486,7 @@ pipeline {
         // image on QA). A failure fails the deployment pipeline.
         stage('UAT Smoke') {
           when {
-            expression { env.BUILD_MODE == 'MAIN' && env.UAT_READY == 'true' }
+            expression { env.UAT_READY == 'true' }
           }
           steps {
             script {
@@ -348,7 +507,7 @@ pipeline {
         // that no longer reproduces, or a failure that is not the defect) marks the build UNSTABLE.
         stage('Known Defects') {
           when {
-            expression { env.BUILD_MODE == 'MAIN' && params.RUN_KNOWN_DEFECTS && env.UAT_SMOKE_PASSED == 'true' }
+            expression { params.RUN_KNOWN_DEFECTS && env.UAT_SMOKE_PASSED == 'true' }
           }
           steps {
             catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
@@ -365,7 +524,7 @@ pipeline {
 
         stage('Deployment Record') {
           when {
-            expression { env.BUILD_MODE == 'MAIN' && env.UAT_SMOKE_PASSED == 'true' }
+            expression { env.UAT_SMOKE_PASSED == 'true' }
           }
           steps {
             script {
@@ -381,6 +540,7 @@ pipeline {
                 "UAT image ID:    ${env.UAT_IMAGE_ID}",
                 "Identity:        MATCH (verified from Docker metadata)",
                 "QA validation:   regression ${env.REGRESSION_EXPECTED}/${env.REGRESSION_EXPECTED} (deployment gate)",
+                "Approved by:     ${env.UAT_APPROVER}",
                 "UAT validation:  smoke ${env.SMOKE_EXPECTED}/${env.SMOKE_EXPECTED} (post-deployment)",
                 "Jenkins build:   ${env.JOB_NAME} #${env.BUILD_NUMBER}",
                 "Build URL:       ${env.BUILD_URL ?: '(Jenkins URL not configured)'}",
@@ -388,7 +548,7 @@ pipeline {
               ].join('\n') + '\n'
               writeFile file: 'deployment/deployment-record.txt', text: record, encoding: 'UTF-8'
               echo record
-              currentBuild.description = "MAIN: UAT validated ${env.IMAGE_ID.substring(0, 19)}"
+              currentBuild.description = "MAIN: UAT validated ${env.IMAGE_ID.substring(0, 19)} (approved by ${env.UAT_APPROVER})"
             }
           }
         }
@@ -396,19 +556,12 @@ pipeline {
 
       post {
         always {
-          junit testResults: 'reports/**/cucumber-junit.xml, reports/**/junit.xml', allowEmptyResults: true
+          junit testResults: 'reports/uat/**/cucumber-junit.xml, reports/uat/**/junit.xml', allowEmptyResults: true
           script {
             if (fileExists('node_modules')) {
-              // QA and UAT stay running (persistent environments). Their logs are saved redacted
-              // and the agent is detached from their networks.
-              sh 'npm run -s env -- teardown qa --keep-running || true'
-              if (env.UAT_IMAGE_ID) {
-                sh 'npm run -s env -- teardown uat --keep-running || true'
-              }
-            }
-            // Human-readable pointers; identity is always the image ID.
-            if (env.QA_IMAGE_ID) {
-              sh 'docker tag "$QA_IMAGE_ID" parabank-qa:current'
+              // UAT stays running (persistent environment). Its log is saved redacted and the agent
+              // is detached from its network.
+              sh 'npm run -s env -- teardown uat --keep-running || true'
             }
             if (env.UAT_SMOKE_PASSED == 'true') {
               sh 'docker tag "$UAT_IMAGE_ID" parabank-uat:current'
@@ -422,8 +575,24 @@ pipeline {
               sh 'npm run -s ci:lock -- release "$BUILD_TAG"'
             }
           }
-          // Traces are never produced in CI; reports are redacted (README "Security approach").
-          archiveArtifacts artifacts: 'reports/**, build/**, deployment/**', allowEmptyArchive: true
+          archiveArtifacts artifacts: 'reports/uat/**, reports/logs/uat.log, deployment/**', allowEmptyArchive: true
+        }
+      }
+    }
+  }
+
+  post {
+    // Approval rejected, timed out or aborted, or the approver check failed: no agent stage removed
+    // the build's image tag, so it is removed here and can never be promoted later by mistake.
+    aborted {
+      script {
+        removeBuildImageTag()
+      }
+    }
+    failure {
+      script {
+        if (env.QA_REGRESSION_PASSED == 'true' && env.UAT_IMAGE_ID == null) {
+          removeBuildImageTag()
         }
       }
     }

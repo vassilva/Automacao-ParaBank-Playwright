@@ -331,11 +331,11 @@ locator assertions, URLs, and the specific network responses each page action wa
 **Jenkins is the CI/CD** (Multibranch Pipeline, `Jenkinsfile`); see [docs/ci-cd.md](docs/ci-cd.md).
 ParaBank is built **once** per pipeline and QA and UAT run that image by ID:
 
-| Event        | Test plan                                                                                                                        |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| Push         | Quality gates → build image → deploy QA → QA Smoke (4); no UAT                                                                   |
-| Pull request | Quality gates → build image → deploy QA → QA Smoke (4); no Regression, no UAT                                                    |
-| `main`       | Quality gates → build image → deploy QA → QA Regression (24, deployment gate) → promote the same image ID to UAT → UAT Smoke (4) |
+| Event        | Test plan                                                                                                                         |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| Push         | Quality gates → build image → deploy QA → QA Smoke (4); no Regression, no UAT                                                     |
+| Pull request | Quality gates → build image → deploy QA → QA Smoke (4) = the required `Jenkins` check; merging is manual                          |
+| `main`       | Quality gates → build image → deploy QA → QA Regression (24) → **manual Jenkins approval** → same image ID to UAT → UAT Smoke (4) |
 
 Each suite run is checked against its approved size (`scripts/ci/verify-suite-coverage.ts`). Known
 defects never gate a deployment (optional stage on `main`, at most UNSTABLE). Cucumber always runs
