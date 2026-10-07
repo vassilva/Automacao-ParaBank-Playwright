@@ -1,0 +1,11 @@
+node_modules/
+reports/
+build/
+deployment/
+.env
+.env.*
+!.env.example
+.test-data/
+# Playwright default output folders (this project writes to reports/; never commit either)
+test-results/
+playwright-report/

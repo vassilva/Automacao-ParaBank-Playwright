@@ -1,0 +1,53 @@
+{
+  "name": "parabank-playwright-qa",
+  "version": "2.0.0",
+  "private": true,
+  "description": "BDD functional tests for ParaBank: Cucumber (Gherkin) driving Playwright with TypeScript",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "cucumber-js",
+    "test:smoke": "cucumber-js --profile smoke",
+    "test:regression": "cucumber-js --profile regression",
+    "test:sanity": "cucumber-js --profile sanity",
+    "test:full": "cucumber-js --profile full",
+    "test:known-defects": "playwright test --config playwright.known-defects.config.ts",
+    "test:known-defects:cucumber": "cucumber-js --profile known-defects",
+    "test:dry-run": "cucumber-js --dry-run --format summary",
+    "check:target": "ts-node scripts/check-target.ts",
+    "app:build": "ts-node scripts/build-parabank-image.ts",
+    "env": "ts-node scripts/environment.ts",
+    "qa:deploy": "ts-node scripts/environment.ts deploy qa",
+    "qa:start": "ts-node scripts/environment.ts start qa",
+    "qa:stop": "ts-node scripts/environment.ts stop qa",
+    "qa:status": "ts-node scripts/environment.ts status qa",
+    "qa:health": "ts-node scripts/environment.ts health qa",
+    "uat:deploy": "ts-node scripts/environment.ts deploy uat",
+    "uat:start": "ts-node scripts/environment.ts start uat",
+    "uat:stop": "ts-node scripts/environment.ts stop uat",
+    "uat:status": "ts-node scripts/environment.ts status uat",
+    "uat:health": "ts-node scripts/environment.ts health uat",
+    "env:identity": "ts-node scripts/environment.ts identity --same",
+    "ci:coverage": "ts-node scripts/ci/verify-suite-coverage.ts",
+    "audit:test-data": "ts-node scripts/audit-test-data.ts",
+    "ci:lock": "ts-node scripts/ci/host-lock.ts",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "browsers:install": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@cucumber/cucumber": "^13.3.0",
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^24.0.0",
+    "eslint": "^10.12.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.71.0"
+  }
+}

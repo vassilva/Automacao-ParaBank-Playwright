@@ -1,0 +1,37 @@
+# Controlled ParaBank environments for automated testing: QA and UAT.
+#
+# One definition serves both; only the variables differ, and scripts/environment.ts sets them
+# from src/support/environments.ts (never run Compose by hand for QA/UAT):
+#   QA   PARABANK_ENV=qa   PARABANK_PORT=8090   project parabank-qa
+#   UAT  PARABANK_ENV=uat  PARABANK_PORT=8091   project parabank-uat
+# Each environment is its own Compose project, so it has its own container and therefore its own
+# embedded database, and is started, stopped and health-checked independently.
+name: parabank-${PARABANK_ENV:?set PARABANK_ENV (qa or uat); use scripts/environment.ts}
+
+services:
+  parabank:
+    # Always an immutable image ID (sha256:...), never a mutable tag and never a silent default:
+    # build once, deploy that image ID to QA, then promote the very same image ID to UAT.
+    image: ${PARABANK_IMAGE:?set PARABANK_IMAGE to an image ID; use scripts/environment.ts}
+    ports:
+      # Web UI and the JSON services only, bound to the loopback interface. The image's other
+      # ports (61616 JMS loan processor, 9001 HSQLDB) are internal and deliberately not published.
+      - '127.0.0.1:${PARABANK_PORT:?set PARABANK_PORT; use scripts/environment.ts}:8080'
+    healthcheck:
+      # The image has no curl/wget; bash's /dev/tcp issues a real HTTP request to the ParaBank
+      # context. 200/302 means Tomcat is up and the application is deployed (404 would not be).
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8080 &&
+          printf 'GET /parabank/index.htm HTTP/1.0\r\n\r\n' >&3 &&
+          head -1 <&3 | grep -qE ' (200|302) '
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+      start_interval: 2s
+    # A crashed environment should fail the run visibly, not restart silently mid-suite.
+    restart: 'no'

@@ -1,0 +1,109 @@
+name: ParaBank BDD
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parabank-bdd-${{ github.ref }}
+  cancel-in-progress: true
+
+# Secondary validation on GitHub-hosted runners (Jenkins is the CI/CD, see docs/ci-cd.md). It runs
+# a throwaway QA environment on the runner from the official ParaBank image pinned by digest,
+# deployed by its image ID (compose.yaml has no default image), never the public site.
+env:
+  TARGET_ENV: qa
+  PARABANK_VENDOR_IMAGE: parasoft/parabank@sha256:a227a8228b4d58c7b803115c3c9ff81ae3229a7655d5c291d2fe3347899699fc
+  # ParaBank's registration is not safe under concurrent requests (see docs/qa-coverage.md).
+  CUCUMBER_PARALLEL: 1
+  CUCUMBER_RETRY: 0
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      # Fails on undefined or ambiguous steps without touching any environment.
+      - run: npm run test:dry-run
+      - run: npm run -s ci:coverage -- --suite smoke --expect 4
+      - run: npm run -s ci:coverage -- --suite regression --expect 24
+
+  smoke:
+    name: QA Smoke
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Deploy QA by image ID
+        run: |
+          docker pull "$PARABANK_VENDOR_IMAGE"
+          npm run -s env -- deploy qa "$(docker image inspect --format '{{.Id}}' "$PARABANK_VENDOR_IMAGE")"
+      - run: npm run qa:health
+      - run: npx playwright install --with-deps chromium
+      - run: REPORTS_DIR=reports/qa/smoke npm run test:smoke
+      - run: npm run -s ci:coverage -- --suite smoke --expect 4 reports/qa/smoke
+      - name: Save redacted ParaBank log and remove QA
+        if: always()
+        run: npm run -s env -- teardown qa
+      - name: Upload smoke reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-reports
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Runs only when QA Smoke passed (needs).
+  regression:
+    name: QA Regression
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Deploy QA by image ID
+        run: |
+          docker pull "$PARABANK_VENDOR_IMAGE"
+          npm run -s env -- deploy qa "$(docker image inspect --format '{{.Id}}' "$PARABANK_VENDOR_IMAGE")"
+      - run: npm run qa:health
+      - run: npx playwright install --with-deps chromium
+      - run: REPORTS_DIR=reports/qa/regression npm run test:regression
+      - run: npm run -s ci:coverage -- --suite regression --expect 24 reports/qa/regression
+      - name: Save redacted ParaBank log and remove QA
+        if: always()
+        run: npm run -s env -- teardown qa
+      # Reports are redacted and masked; Playwright traces stay disabled in CI.
+      - name: Upload regression reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-reports
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
