@@ -18,6 +18,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { lineRedactor } from './log-redaction';
 
 const CONTEXT = path.join('docker', 'parabank');
 const OUT_DIR = 'build';
@@ -113,15 +114,22 @@ async function main(): Promise<void> {
       ...(fresh ? ['--no-cache-filter', 'build'] : []),
       CONTEXT,
     ]);
-    for (const stream of [build.stdout, build.stderr]) {
-      stream.on('data', (chunk: Buffer) => {
-        process.stdout.write(chunk);
-        log.write(chunk);
+    // ParaBank's own tests print its demo customer (username, password, sample SSN): every line is
+    // redacted before it reaches the console (the Jenkins log) or build/parabank-build.log.
+    const redactors = [build.stdout, build.stderr].map((stream) => {
+      const redactor = lineRedactor((text) => {
+        process.stdout.write(text);
+        log.write(text);
       });
-    }
-    build.on('close', (code) => resolve(code ?? 1));
+      stream.on('data', (chunk: Buffer) => redactor.push(chunk));
+      return redactor;
+    });
+    build.on('close', (code) => {
+      redactors.forEach((redactor) => redactor.flush());
+      resolve(code ?? 1);
+    });
   });
-  log.end();
+  await new Promise<void>((resolve) => log.end(resolve));
   const seconds = Math.round((Date.now() - started) / 1000);
   const buildLog = readFileSync(logPath, 'utf8');
 

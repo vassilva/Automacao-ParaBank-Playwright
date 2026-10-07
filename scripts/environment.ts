@@ -24,6 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import path from 'node:path';
+import { redactLog } from './log-redaction';
 import {
   ENVIRONMENTS,
   composeProject,
@@ -217,22 +218,6 @@ function identity(environment: EnvironmentName, expected?: string): string {
   return current.imageId;
 }
 
-/** ParaBank logs credentials and SSNs (see docs/qa-coverage.md); never archive them in clear. */
-const SECRETS: [RegExp, string][] = [
-  [/(password\s*=\s*)[^\s,\]&]+/gi, '$1[REDACTED]'],
-  [/(ssn\s*=\s*)[^\s,\]&]+/gi, '$1[REDACTED]'],
-  [/(jsessionid=)[A-Za-z0-9.]+/gi, '$1[REDACTED]'],
-  [/\bPw[A-Za-z0-9_-]{16,24}\b/g, '[REDACTED]'],
-  [/\b000-\d{2}-\d{4}\b/g, '[REDACTED]'],
-];
-
-export function redact(text: string): string {
-  return SECRETS.reduce(
-    (result, [pattern, replacement]) => result.replace(pattern, replacement),
-    text,
-  );
-}
-
 function saveLog(environment: EnvironmentName): void {
   const dir = path.join(process.env.REPORTS_DIR || 'reports', 'logs');
   mkdirSync(dir, { recursive: true });
@@ -240,9 +225,9 @@ function saveLog(environment: EnvironmentName): void {
     ['compose', 'logs', '--no-color', '--timestamps', 'parabank'],
     composeEnv(environment),
   );
-  const safe = redact(raw);
-  const leftovers = /password\s*=\s*(?!\[REDACTED\])\S|ssn\s*=\s*(?!\[REDACTED\])\S/i;
-  if (leftovers.test(safe)) throw new Error('Log redaction incomplete; log not saved');
+  // ParaBank logs customers in clear text (usernames, passwords, SSNs): redacted line by line, and
+  // any line that still looks like a credential is withheld (scripts/log-redaction.ts).
+  const safe = redactLog(raw);
   const file = path.join(dir, `${environment}.log`);
   writeFileSync(file, safe);
   console.log(`Saved redacted ParaBank log: ${file}`);

@@ -1,11 +1,15 @@
 // Jenkins CI/CD for the ParaBank BDD project (Playwright + TypeScript + Cucumber).
 // One Jenkinsfile, one Multibranch Pipeline; the build event selects the lifecycle:
 //
-//   PUSH (branch)   Build Image -> Deploy QA -> QA Ready -> QA Smoke
-//   PULL REQUEST    Build Image -> Deploy QA -> QA Ready -> QA Smoke -> QA Regression
-//   MAIN            Build Image -> Deploy QA -> QA Ready -> QA Smoke
-//                   -> Promote to UAT -> UAT Ready -> UAT Smoke -> UAT Regression
-//                   [-> Known Defects (optional, never gating)] -> Deployment Record
+//   PULL REQUEST (CI)  Quality Gates -> Build Image -> Deploy QA -> QA Ready -> QA Smoke (4)
+//   PUSH (branch)      same as PULL REQUEST (a branch with an open PR is built as the PR only)
+//   MAIN (CD)          Quality Gates -> Build Image -> Deploy QA -> QA Ready -> QA Regression (24)
+//                      -> Promote to UAT -> UAT Ready -> UAT Smoke (4)
+//                      [-> Known Defects (optional, never gating)] -> Deployment Record
+//
+// Test sequence: PR Smoke -> merge -> QA Regression -> UAT deployment -> UAT Smoke. Regression
+// validates the newly built application on QA before anything reaches UAT; a PR never deploys
+// to UAT; the main pipeline runs no QA Smoke and no UAT Regression.
 //
 // BUILD ONCE, PROMOTE THE SAME IMAGE: ParaBank is built once per pipeline from the pinned official
 // source commit (docker/parabank/source.env), with its own 239 tests. QA and UAT run that image by
@@ -16,9 +20,10 @@
 // environments on the Jenkins Docker host (src/support/environments.ts): separate containers and
 // databases. A deployment recreates the environment's container (fresh database) from the image.
 //
-// SMOKE GATES REGRESSION: stages run in sequence; a failed Smoke stage fails the build and every
-// later stage is skipped. Regression additionally requires the Smoke stage's own success flag.
-// Each suite run is validated against its approved count (scripts/ci/verify-suite-coverage.ts).
+// GATES: stages run in sequence; a failed suite fails its stage and the build, and every later
+// stage is skipped. Promotion additionally requires the QA Regression stage's own success flag,
+// set only after the suite and its count check both passed. Each suite run is validated against
+// its approved count (scripts/ci/verify-suite-coverage.ts).
 //
 // Cucumber runs with ONE worker and no retries everywhere: ParaBank registration is not
 // concurrency-safe (docs/qa-coverage.md). HOST LOCK: QA and UAT are shared by every job, so the
@@ -64,17 +69,17 @@ pipeline {
     booleanParam(
       name: 'RUN_KNOWN_DEFECTS',
       defaultValue: false,
-      description: 'MAIN only: after the UAT gate, run the 25 known-defect scenarios (never fails the deployment; a defect that no longer reproduces marks the build UNSTABLE).'
+      description: 'MAIN only: after UAT Smoke passed, run the 25 known-defect scenarios on UAT (never fails the deployment; a defect that no longer reproduces, or a failure that is not the defect, marks the build UNSTABLE).'
     )
     choice(
       name: 'ADDITIONAL_QA_SUITE',
       choices: ['none', 'sanity', 'full'],
-      description: 'Run an extra suite on QA after the QA Smoke gate (manual or release use).'
+      description: 'Run an extra suite on QA after the QA gate passed (manual or release use).'
     )
     choice(
       name: 'GATE_DRILL',
-      choices: ['none', 'fail-uat-smoke'],
-      description: 'MAIN only, for proving the deployment gate: fail-uat-smoke runs UAT Smoke against an unreachable port of the UAT container, so Smoke fails for real (transport errors) and UAT Regression must not run. Changes no test and no environment.'
+      choices: ['none', 'fail-qa-regression', 'fail-uat-smoke'],
+      description: 'MAIN only, proves a deployment gate without changing any test or environment: fail-qa-regression runs QA Regression, fail-uat-smoke runs UAT Smoke, against an unreachable port of that container, so the suite fails for real (transport errors). Expected: build FAILURE; with fail-qa-regression nothing is deployed to UAT.'
     )
   }
 
@@ -116,9 +121,9 @@ pipeline {
           def tagHash = ((env.BUILD_TAG ?: "local-${env.BUILD_NUMBER}").hashCode() & 0x7fffffff) % 100000
           env.IMAGE_TAG = "parabank-ci:${branchPart}-${env.BUILD_NUMBER}-${tagHash}"
           def plan = [
-            'PUSH'        : 'QA: Smoke',
-            'PULL REQUEST': 'QA: Smoke -> Regression',
-            'MAIN'        : 'QA: Smoke; UAT: Smoke -> Regression',
+            'PUSH'        : 'QA: Smoke (no UAT)',
+            'PULL REQUEST': 'QA: Smoke (no Regression, no UAT)',
+            'MAIN'        : 'QA: Regression (gate) -> promote same image -> UAT: Smoke',
           ][env.BUILD_MODE]
           banner('PARABANK PIPELINE', [
             'BUILD MODE'      : env.BUILD_MODE,
@@ -236,29 +241,43 @@ pipeline {
           }
         }
 
+        // CI (pull requests and branch pushes): the candidate image must pass Smoke on QA.
         stage('QA Smoke') {
+          when {
+            expression { env.BUILD_MODE != 'MAIN' }
+          }
           steps {
             script {
               runSuite('qa', 'smoke', env.SMOKE_EXPECTED)
-              env.QA_SMOKE_PASSED = 'true'
+              env.QA_GATE_PASSED = 'true'
             }
           }
         }
 
+        // CD (main): the deployment gate. Nothing reaches UAT unless the newly built image passes
+        // the whole Regression suite on QA.
         stage('QA Regression') {
           when {
-            expression { env.BUILD_MODE == 'PULL REQUEST' && env.QA_SMOKE_PASSED == 'true' }
+            expression { env.BUILD_MODE == 'MAIN' }
           }
           steps {
             script {
-              runSuite('qa', 'regression', env.REGRESSION_EXPECTED)
+              def drillUrl = ''
+              if (params.GATE_DRILL == 'fail-qa-regression') {
+                // Nothing listens on port 1: every scenario fails at transport level, for real.
+                drillUrl = 'http://parabank-qa-parabank-1:1/parabank/'
+                banner('GATE DRILL', ['QA REGRESSION TARGET': drillUrl, 'EXPECTED': 'Regression fails; nothing is promoted to UAT; build FAILURE'])
+              }
+              runSuite('qa', 'regression', env.REGRESSION_EXPECTED, drillUrl)
+              env.QA_REGRESSION_PASSED = 'true'
+              env.QA_GATE_PASSED = 'true'
             }
           }
         }
 
         stage('QA Additional Suite') {
           when {
-            expression { params.ADDITIONAL_QA_SUITE != 'none' && env.QA_SMOKE_PASSED == 'true' }
+            expression { params.ADDITIONAL_QA_SUITE != 'none' && env.QA_GATE_PASSED == 'true' }
           }
           steps {
             script {
@@ -268,10 +287,10 @@ pipeline {
           }
         }
 
-        // PROMOTE: the very same image ID QA validated, never a rebuild.
+        // PROMOTE: the very same image ID QA Regression validated, never a rebuild.
         stage('Promote to UAT') {
           when {
-            expression { env.BUILD_MODE == 'MAIN' && env.QA_SMOKE_PASSED == 'true' }
+            expression { env.BUILD_MODE == 'MAIN' && env.QA_REGRESSION_PASSED == 'true' }
           }
           steps {
             script {
@@ -304,7 +323,8 @@ pipeline {
           }
         }
 
-        // The deployment gate. Smoke decides whether Regression runs at all.
+        // Post-deployment verification of UAT: Smoke only (Regression already validated this exact
+        // image on QA). A failure fails the deployment pipeline.
         stage('UAT Smoke') {
           when {
             expression { env.BUILD_MODE == 'MAIN' && env.UAT_READY == 'true' }
@@ -315,22 +335,10 @@ pipeline {
               if (params.GATE_DRILL == 'fail-uat-smoke') {
                 // Nothing listens on port 1: every scenario fails at transport level, for real.
                 drillUrl = 'http://parabank-uat-parabank-1:1/parabank/'
-                banner('GATE DRILL', ['UAT SMOKE TARGET': drillUrl, 'EXPECTED': 'Smoke fails; UAT Regression is not executed; build FAILURE'])
+                banner('GATE DRILL', ['UAT SMOKE TARGET': drillUrl, 'EXPECTED': 'UAT Smoke fails; build FAILURE; no Deployment Record'])
               }
               runSuite('uat', 'smoke', env.SMOKE_EXPECTED, drillUrl)
               env.UAT_SMOKE_PASSED = 'true'
-            }
-          }
-        }
-
-        stage('UAT Regression') {
-          when {
-            expression { env.BUILD_MODE == 'MAIN' && env.UAT_SMOKE_PASSED == 'true' }
-          }
-          steps {
-            script {
-              runSuite('uat', 'regression', env.REGRESSION_EXPECTED)
-              env.UAT_REGRESSION_PASSED = 'true'
             }
           }
         }
@@ -340,7 +348,7 @@ pipeline {
         // that no longer reproduces, or a failure that is not the defect) marks the build UNSTABLE.
         stage('Known Defects') {
           when {
-            expression { env.BUILD_MODE == 'MAIN' && params.RUN_KNOWN_DEFECTS && env.UAT_REGRESSION_PASSED == 'true' }
+            expression { env.BUILD_MODE == 'MAIN' && params.RUN_KNOWN_DEFECTS && env.UAT_SMOKE_PASSED == 'true' }
           }
           steps {
             catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
@@ -357,7 +365,7 @@ pipeline {
 
         stage('Deployment Record') {
           when {
-            expression { env.BUILD_MODE == 'MAIN' && env.UAT_REGRESSION_PASSED == 'true' }
+            expression { env.BUILD_MODE == 'MAIN' && env.UAT_SMOKE_PASSED == 'true' }
           }
           steps {
             script {
@@ -372,8 +380,8 @@ pipeline {
                 "QA image ID:     ${env.QA_IMAGE_ID}",
                 "UAT image ID:    ${env.UAT_IMAGE_ID}",
                 "Identity:        MATCH (verified from Docker metadata)",
-                "QA validation:   smoke ${env.SMOKE_EXPECTED}/${env.SMOKE_EXPECTED}",
-                "UAT validation:  smoke ${env.SMOKE_EXPECTED}/${env.SMOKE_EXPECTED}, then regression ${env.REGRESSION_EXPECTED}/${env.REGRESSION_EXPECTED}",
+                "QA validation:   regression ${env.REGRESSION_EXPECTED}/${env.REGRESSION_EXPECTED} (deployment gate)",
+                "UAT validation:  smoke ${env.SMOKE_EXPECTED}/${env.SMOKE_EXPECTED} (post-deployment)",
                 "Jenkins build:   ${env.JOB_NAME} #${env.BUILD_NUMBER}",
                 "Build URL:       ${env.BUILD_URL ?: '(Jenkins URL not configured)'}",
                 '========================================',
@@ -402,7 +410,7 @@ pipeline {
             if (env.QA_IMAGE_ID) {
               sh 'docker tag "$QA_IMAGE_ID" parabank-qa:current'
             }
-            if (env.UAT_REGRESSION_PASSED == 'true') {
+            if (env.UAT_SMOKE_PASSED == 'true') {
               sh 'docker tag "$UAT_IMAGE_ID" parabank-uat:current'
             }
             sh '''
