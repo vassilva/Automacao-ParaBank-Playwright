@@ -1,21 +1,35 @@
 // Jenkins CI/CD for the ParaBank BDD project (Playwright + TypeScript + Cucumber).
-// One Jenkinsfile, one Multibranch Pipeline. The mandatory sequence is:
+// One Jenkinsfile, one Multibranch Pipeline. The target flow is:
 //
-//   Pull Request -> QA Smoke (4) -> required Jenkins check passes -> manual GitHub merge
-//   -> QA Regression (24) -> manual Jenkins approval -> UAT deployment -> UAT Smoke (4)
+//   Push -> role validation -> Pull Request -> Quality Gates + QA Smoke + Impacted Tests (the
+//   required "Jenkins" check) -> GitHub auto-merge (enabled per PR) -> main: QA deploy -> QA
+//   Regression (24) -> manual Jenkins approval -> UAT deployment (same image) -> UAT Smoke (4)
 //
-//   PULL REQUEST (CI)  Build and QA:   Quality Gates -> Build Image -> Deploy QA -> QA Ready
-//                                      -> QA Smoke (4). No Regression, no UAT. This build's
-//                                      result is the "Jenkins" check that GitHub requires.
-//   PUSH (branch)      same as PULL REQUEST (a branch with an open PR is built as the PR only)
+//   PUSH (branch, by prefix; a branch with an open PR is built as the PR only):
+//     feature/* and others  DEVELOPER     Quality Gates -> Build Image -> Deploy QA -> QA Smoke (4)
+//     qa/*                  QA            Quality Gates -> Build Image -> Deploy QA -> QA Impacted
+//                                         Tests (vs main)
+//     config/*              CONFIGURATOR  Quality Gates -> Config Check. No image, no deployment,
+//                                         no host lock.
+//   PULL REQUEST (CI)  Quality Gates -> Build Image -> Deploy QA -> QA Ready -> QA Smoke (4) -> QA
+//                      Impacted Tests (scripts/ci/impacted-tests.ts: the PR's changed files vs the
+//                      target branch; shared code -> Regression (24)). No UAT. This build's result
+//                      is the "Jenkins" check GitHub requires before (auto-)merging.
 //   MAIN (CD)          Build and QA:   Quality Gates -> Build Image -> Deploy QA -> QA Ready
 //                                      -> QA Regression (24). No QA Smoke.
 //                      UAT Approval:   mandatory input by an authorized approver (no agent, no
 //                                      lock held while waiting); reject or timeout -> ABORTED,
 //                                      nothing deployed to UAT.
-//                      UAT Deployment: Verify Approved Image -> Promote to UAT (same image ID)
-//                                      -> UAT Ready -> UAT Smoke (4) [-> Known Defects, optional]
-//                                      -> Deployment Record. No UAT Regression.
+//                      UAT Deployment: Verify Approved Image (still main's head) -> Promote to UAT
+//                                      (same image ID) -> UAT Ready -> UAT Smoke (4)
+//                                      [-> Known Defects, optional] -> Deployment Record.
+//
+// SUPERSEDING (milestones, no disableConcurrentBuilds): a newer build of the same branch or PR
+// aborts the older one at once. On main, builds run to QA Regression in order (host lock); a build
+// that reaches the approval aborts any older build still waiting for approval, an older build can
+// no longer request or pass approval once a newer one did, and a build already approved and
+// deploying to UAT is never interrupted. Verify Approved Image also aborts (SUPERSEDED) unless the
+// build's commit is still main's head, so only the latest validated image can reach UAT.
 //
 // BUILD ONCE, PROMOTE THE SAME IMAGE: ParaBank is built once per pipeline from the pinned official
 // source commit (docker/parabank/source.env), with its own 239 tests. QA and UAT run that image by
@@ -89,8 +103,8 @@ pipeline {
   options {
     buildDiscarder(logRotator(numToKeepStr: '20'))
     timestamps()
-    // One build at a time per branch/PR job; the host lock serializes builds of different jobs.
-    disableConcurrentBuilds()
+    // No disableConcurrentBuilds(): superseding is done with milestones (see the header), and the
+    // host lock serializes every build that builds, deploys or tests.
   }
 
   parameters {
@@ -140,6 +154,21 @@ pipeline {
           } else {
             env.BUILD_MODE = 'PUSH'
           }
+          // Role-specific validation of a push, by branch prefix. PRs and main have their own plan.
+          if (env.BUILD_MODE == 'PUSH') {
+            def branch = env.BRANCH_NAME ?: ''
+            env.PIPELINE_ROLE = branch.startsWith('qa/') ? 'QA' : (branch.startsWith('config/') ? 'CONFIGURATOR' : 'DEVELOPER')
+          } else {
+            env.PIPELINE_ROLE = env.BUILD_MODE == 'MAIN' ? 'CD' : 'CI'
+          }
+          env.DEPLOYS_QA = env.PIPELINE_ROLE == 'CONFIGURATOR' ? 'false' : 'true'
+          env.RUNS_SMOKE = (env.BUILD_MODE == 'PULL REQUEST' || env.PIPELINE_ROLE == 'DEVELOPER') ? 'true' : 'false'
+          env.RUNS_IMPACTED = (env.BUILD_MODE == 'PULL REQUEST' || env.PIPELINE_ROLE == 'QA') ? 'true' : 'false'
+          // A newer build of a branch or PR aborts this one (an older build whose last milestone is
+          // lower is cancelled). Main builds are not superseded here, only at the approval.
+          if (env.BUILD_MODE != 'MAIN') {
+            milestone(ordinal: Integer.parseInt(env.BUILD_NUMBER), label: 'Newest build of this branch or PR')
+          }
           // <branch, 12 chars max>-<build number>-<hash of the full BUILD_TAG>: unique across jobs.
           def branchPart = (env.BRANCH_NAME ?: 'build').toLowerCase().replaceAll('[^a-z0-9]+', '-').replaceAll('^-+', '')
           if (branchPart.length() > 12) {
@@ -149,12 +178,15 @@ pipeline {
           def tagHash = ((env.BUILD_TAG ?: "local-${env.BUILD_NUMBER}").hashCode() & 0x7fffffff) % 100000
           env.IMAGE_TAG = "parabank-ci:${branchPart}-${env.BUILD_NUMBER}-${tagHash}"
           def plan = [
-            'PUSH'        : 'QA: Smoke (no Regression, no UAT)',
-            'PULL REQUEST': 'QA: Smoke (no Regression, no UAT) -> required check for merge',
-            'MAIN'        : 'QA: Regression (gate) -> manual approval -> promote same image -> UAT: Smoke',
-          ][env.BUILD_MODE]
+            'DEVELOPER'   : 'QA: Smoke (no Regression, no UAT)',
+            'QA'          : 'QA: Impacted Tests vs main (no UAT)',
+            'CONFIGURATOR': 'Quality Gates + Config Check (no image, no deployment)',
+            'CI'          : 'QA: Smoke + Impacted Tests (no UAT) -> required check for (auto-)merge',
+            'CD'          : 'QA: Regression (gate) -> manual approval -> promote same image -> UAT: Smoke',
+          ][env.PIPELINE_ROLE]
           banner('PARABANK PIPELINE', [
             'BUILD MODE'      : env.BUILD_MODE,
+            'ROLE'            : env.PIPELINE_ROLE,
             'TEST PLAN'       : plan,
             'BRANCH'          : env.BRANCH_NAME,
             'PULL REQUEST'    : env.CHANGE_ID ? "#${env.CHANGE_ID} (${env.CHANGE_BRANCH} -> ${env.CHANGE_TARGET})" : 'no',
@@ -163,7 +195,7 @@ pipeline {
             'SUITE SIZES'     : "smoke ${env.SMOKE_EXPECTED}, regression ${env.REGRESSION_EXPECTED}",
             'CUCUMBER WORKERS': env.CUCUMBER_PARALLEL,
           ])
-          currentBuild.description = env.BUILD_MODE
+          currentBuild.description = env.BUILD_MODE == 'PUSH' ? "PUSH (" + env.PIPELINE_ROLE + ")" : env.BUILD_MODE
         }
       }
     }
@@ -221,7 +253,21 @@ pipeline {
           }
         }
 
+        // CONFIGURATOR pushes (config/*): the environment configuration renders for QA and UAT,
+        // requires an image ID, and keeps their projects and ports distinct. Nothing is deployed.
+        stage('Config Check') {
+          when {
+            expression { env.PIPELINE_ROLE == 'CONFIGURATOR' }
+          }
+          steps {
+            sh 'npm run -s ci:config-check'
+          }
+        }
+
         stage('Acquire Host Lock') {
+          when {
+            expression { env.DEPLOYS_QA == 'true' }
+          }
           steps {
             sh 'npm run -s ci:lock -- acquire "$BUILD_TAG"'
           }
@@ -229,6 +275,9 @@ pipeline {
 
         // BUILD ONCE: the only image build of the pipeline. QA and UAT receive this image ID.
         stage('Build Image') {
+          when {
+            expression { env.DEPLOYS_QA == 'true' }
+          }
           steps {
             script {
               sh 'PARABANK_IMAGE_TAG="$IMAGE_TAG" PARABANK_BUILD_FRESH=true npm run app:build'
@@ -253,6 +302,9 @@ pipeline {
         }
 
         stage('Deploy QA') {
+          when {
+            expression { env.DEPLOYS_QA == 'true' }
+          }
           steps {
             script {
               sh 'npm run -s env -- deploy qa "$IMAGE_ID"'
@@ -263,22 +315,56 @@ pipeline {
         }
 
         stage('QA Ready') {
+          when {
+            expression { env.DEPLOYS_QA == 'true' }
+          }
           steps {
             sh 'npm run -s env -- health qa --wait'
             sh 'npm run -s env -- identity qa --expect "$IMAGE_ID"'
           }
         }
 
-        // CI (pull requests and branch pushes): the candidate image must pass Smoke on QA. For a
-        // pull request, this build's result is the required "Jenkins" check on GitHub.
+        // CI (pull requests and DEVELOPER pushes): the candidate image must pass Smoke on QA.
         stage('QA Smoke') {
           when {
-            expression { env.BUILD_MODE != 'MAIN' }
+            expression { env.RUNS_SMOKE == 'true' }
           }
           steps {
             script {
               runSuite('qa', 'smoke', env.SMOKE_EXPECTED)
+              env.QA_SMOKE_PASSED = 'true'
+            }
+          }
+        }
+
+        // Pull requests (after Smoke) and QA pushes: the scenarios the change can affect, chosen
+        // from its changed files against the target branch (scripts/ci/impacted-tests.ts; shared
+        // code -> the whole Regression suite, documentation and CI tooling -> nothing more), then
+        // checked to have run exactly, once, and passed. With Smoke, this is the PR's "Jenkins"
+        // check that GitHub requires before a merge or an auto-merge.
+        stage('QA Impacted Tests') {
+          when {
+            expression { env.RUNS_IMPACTED == 'true' && (env.RUNS_SMOKE != 'true' || env.QA_SMOKE_PASSED == 'true') }
+          }
+          steps {
+            withEnv([
+              'TARGET_ENV=qa',
+              'PARABANK_BASE_URL=http://parabank-qa-parabank-1:8080/parabank/',
+            ]) {
+              sh 'npm run -s ci:impacted -- run'
+            }
+          }
+        }
+
+        // The QA gate of a CI build: every validation its role requires passed.
+        stage('QA Gate') {
+          when {
+            expression { env.BUILD_MODE != 'MAIN' && env.DEPLOYS_QA == 'true' }
+          }
+          steps {
+            script {
               env.QA_GATE_PASSED = 'true'
+              echo "QA GATE PASSED (${env.PIPELINE_ROLE}): smoke ${env.RUNS_SMOKE}, impacted tests ${env.RUNS_IMPACTED}"
             }
           }
         }
@@ -321,7 +407,8 @@ pipeline {
         always {
           junit testResults: 'reports/qa/**/cucumber-junit.xml', allowEmptyResults: true
           script {
-            if (fileExists('node_modules')) {
+            // CONFIGURATOR builds never touch QA (no lock is held for it).
+            if (env.DEPLOYS_QA == 'true' && fileExists('node_modules')) {
               // QA stays running (persistent environment). Its log is saved redacted and the agent
               // is detached from its network.
               sh 'npm run -s env -- teardown qa --keep-running || true'
@@ -332,14 +419,14 @@ pipeline {
             }
             // The build's tag survives only while this image may still be approved for UAT.
             def awaitingApproval = env.BUILD_MODE == 'MAIN' && env.QA_REGRESSION_PASSED == 'true'
-            if (!awaitingApproval) {
+            if (!awaitingApproval && env.DEPLOYS_QA == 'true') {
               sh '''
                 if docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
                   docker image rm "$IMAGE_TAG"
                 fi
               '''
             }
-            if (fileExists('node_modules')) {
+            if (env.DEPLOYS_QA == 'true' && fileExists('node_modules')) {
               sh 'npm run -s ci:lock -- release "$BUILD_TAG"'
             }
           }
@@ -365,6 +452,11 @@ pipeline {
             error('UAT approval is not configured: set the Jenkins global property PARABANK_UAT_APPROVERS to the Jenkins user ID(s) allowed to approve. Nothing is deployed to UAT.')
           }
           def minutes = (env.PARABANK_UAT_APPROVAL_MINUTES ?: '60') as Integer
+          // SUPERSEDING (pipeline-milestone-step): passing ordinal N cancels every older running
+          // build whose last milestone is lower, and cancels this build if a newer one already
+          // passed N or more. Ordinal = build number here: an older build waiting for approval is
+          // aborted, and this build is aborted if a newer one already asked for approval.
+          milestone(ordinal: Integer.parseInt(env.BUILD_NUMBER), label: 'UAT approval requested')
           banner('UAT APPROVAL REQUIRED', [
             'IMAGE ID'        : env.IMAGE_ID,
             'SOURCE COMMIT'   : env.SOURCE_COMMIT,
@@ -388,6 +480,10 @@ pipeline {
           if (!approvers.contains(approver)) {
             error("'${approver}' is not an authorized UAT approver (PARABANK_UAT_APPROVERS). Nothing is deployed to UAT.")
           }
+          // Higher than any build number: a build approved and deploying is never cancelled by a
+          // newer build reaching the approval, and an older build approved after a newer one was
+          // approved is aborted here.
+          milestone(ordinal: 1000000000, label: 'UAT approved')
           env.UAT_APPROVER = approver
           env.UAT_APPROVED = 'true'
           echo "UAT deployment approved by ${approver}"
@@ -436,9 +532,25 @@ pipeline {
         }
 
         // The image approved is the image QA Regression validated: same ID, still present, built
-        // from the pinned commit.
+        // from the pinned commit, and the build's commit is still main's head (otherwise a newer
+        // main build supersedes it: ABORTED, nothing deployed).
         stage('Verify Approved Image') {
           steps {
+            script {
+              // The remote URL is never traced (set +x).
+              def head = sh(returnStdout: true, script: '''
+                set +x
+                url=$(git -c safe.directory='*' config --get remote.origin.url)
+                git ls-remote "$url" "refs/heads/$BRANCH_NAME" | cut -f1
+              ''').trim()
+              if (!(head ==~ /[0-9a-f]{40}/)) {
+                error("Could not read the head of ${env.BRANCH_NAME}; nothing is deployed to UAT.")
+              }
+              if (head != env.GIT_COMMIT) {
+                currentBuild.result = 'ABORTED'
+                error("SUPERSEDED: ${env.BRANCH_NAME} is now at ${head}, this build validated ${env.GIT_COMMIT}. Only the latest validated image may reach UAT; nothing is deployed.")
+              }
+            }
             sh '''
               set -eu
               test -n "$IMAGE_ID"

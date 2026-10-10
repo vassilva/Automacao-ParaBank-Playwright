@@ -7,10 +7,10 @@ Playwright drives the browser and the bank's own JSON endpoints underneath.
 The same suite runs against either controlled environment; nothing in the features, steps or
 pages is environment-specific (`TARGET_ENV` selects the target):
 
-| Environment | URL                               | What it is                                                                    |
-| ----------- | --------------------------------- | ----------------------------------------------------------------------------- |
-| `qa`        | `http://localhost:8090/parabank/` | Every build is deployed and smoke-tested here (default target)                |
-| `uat`       | `http://localhost:8091/parabank/` | MAIN builds are promoted here (same image ID) and gated by Smoke → Regression |
+| Environment | URL                               | What it is                                                                   |
+| ----------- | --------------------------------- | ---------------------------------------------------------------------------- |
+| `qa`        | `http://localhost:8090/parabank/` | Every deploying build is validated here (default target)                     |
+| `uat`       | `http://localhost:8091/parabank/` | MAIN builds: QA Regression, approval, then the same image ID here, UAT Smoke |
 
 Both run the same immutable, source-built ParaBank image, built once and promoted by image ID
 (see [Environments](#environments) and [docs/ci-cd.md](docs/ci-cd.md)). The public ParaBank site
@@ -87,7 +87,7 @@ Playwright (Chromium)  →  ParaBank
 │   │                   provisioning.ts, parameter-types.ts
 │   └── utils/          money.ts
 ├── scripts/check-target.ts   target health check (one-shot or bounded polling)
-├── Jenkinsfile           Multibranch CI/CD: build once → QA; main → promote to UAT → Smoke → Regression
+├── Jenkinsfile           Multibranch CI/CD: build once → QA; main → approval → same image to UAT → Smoke
 ├── compose.yaml          the QA and UAT environments (one definition, separate Compose projects)
 ├── docker/parabank/      source-built ParaBank image: Dockerfile + pinned source commit
 ├── docker/ci-agent/      Jenkins agent image: pinned Playwright + Docker CLI
@@ -136,10 +136,10 @@ Two controlled environments, defined once in `src/support/environments.ts` and r
 `compose.yaml` as separate Compose projects: separate containers, separate embedded databases,
 loopback ports only. Each one is deployed, started, stopped and health-checked on its own.
 
-| Environment | Compose project | URL                               | Typical use                                         |
-| ----------- | --------------- | --------------------------------- | --------------------------------------------------- |
-| QA          | `parabank-qa`   | `http://localhost:8090/parabank/` | every build; Smoke (PUSH), Smoke → Regression (PR)  |
-| UAT         | `parabank-uat`  | `http://localhost:8091/parabank/` | MAIN builds: the deployment gate Smoke → Regression |
+| Environment | Compose project | URL                               | Typical use                                      |
+| ----------- | --------------- | --------------------------------- | ------------------------------------------------ |
+| QA          | `parabank-qa`   | `http://localhost:8090/parabank/` | PR/push: Smoke, Impacted Tests; main: Regression |
+| UAT         | `parabank-uat`  | `http://localhost:8091/parabank/` | MAIN builds after approval: UAT Smoke            |
 
 ```powershell
 npm run app:build          # BUILD ONCE: source-built image, ID recorded in build/parabank-image.json
@@ -331,11 +331,11 @@ locator assertions, URLs, and the specific network responses each page action wa
 **Jenkins is the CI/CD** (Multibranch Pipeline, `Jenkinsfile`); see [docs/ci-cd.md](docs/ci-cd.md).
 ParaBank is built **once** per pipeline and QA and UAT run that image by ID:
 
-| Event        | Test plan                                                                                                                         |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| Push         | Quality gates → build image → deploy QA → QA Smoke (4); no Regression, no UAT                                                     |
-| Pull request | Quality gates → build image → deploy QA → QA Smoke (4) = the required `Jenkins` check; merging is manual                          |
-| `main`       | Quality gates → build image → deploy QA → QA Regression (24) → **manual Jenkins approval** → same image ID to UAT → UAT Smoke (4) |
+| Event        | Test plan                                                                                                                          |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Push         | By branch prefix: `feature/*` QA Smoke (4); `qa/*` QA Impacted Tests; `config/*` Quality Gates + Config Check only (no deployment) |
+| Pull request | Quality gates → build image → deploy QA → QA Smoke (4) → QA Impacted Tests = the required `Jenkins` check; auto-merge per PR       |
+| `main`       | Quality gates → build image → deploy QA → QA Regression (24) → **manual Jenkins approval** → same image ID to UAT → UAT Smoke (4)  |
 
 Each suite run is checked against its approved size (`scripts/ci/verify-suite-coverage.ts`). Known
 defects never gate a deployment (optional stage on `main`, at most UNSTABLE). Cucumber always runs

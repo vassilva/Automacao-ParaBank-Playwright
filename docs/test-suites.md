@@ -134,8 +134,10 @@ duplicates removed (#8, #11), #35 added to Regression, #5 renamed; every change 
 
 ## Use in CI
 
-Jenkins ([ci-cd.md](ci-cd.md)) runs Smoke (4) on QA for pull requests, and on `main` Regression (24)
-on QA as the deployment gate, then (after a manual approval) Smoke (4) on UAT; Sanity (10) and Full (52) on demand. It
+Jenkins ([ci-cd.md](ci-cd.md)) runs Smoke (4) and the impacted tests (the changed features, or
+Regression (24) when shared code changed) on QA for pull requests, and on `main` Regression (24) on
+QA as the deployment gate, then (after a manual approval) Smoke (4) on UAT; Sanity (10) and Full
+(52) on demand. It
 validates each suite on its own against its approved size: the Quality Gates stage fails before any
 deployment if a tag change alters a suite, and every run must have executed exactly its suite's
 scenarios, once, all passed (`scripts/ci/verify-suite-coverage.ts`). Suites are never assumed to

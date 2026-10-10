@@ -1,5 +1,5 @@
 {
-  "name": "main: pull request + Jenkins PR Smoke",
+  "name": "main: pull request + Jenkins PR check (up to date)",
   "target": "branch",
   "enforcement": "active",
   "conditions": {
