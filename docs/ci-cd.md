@@ -551,6 +551,23 @@ anyone else (verified on the isolated Jenkins).
 
 ## Failure, rollback and recovery
 
+Observed on the real Jenkins (2026-10-10), and what to do about it:
+
+- **Enabling the scan trigger builds every branch it has not built yet**, with that branch's own
+  Jenkinsfile. The first scan started `main` #2 on the old merge commit (whose old pipeline
+  promoted to UAT without approval) and the stale `feature/ci-jenkins-pipeline`. They were held at
+  the host lock (a manual lock owner) and aborted before building anything. Before enabling
+  scanning on a job, check which heads it has never built.
+- **A hard-killed build can keep its executor.** After a forced abort ("Hard kill!") the agent
+  container stayed up and one built-in executor stayed busy, so the next build waited with
+  "Still waiting to schedule task" (the `windows-agent` line in that message only means that node
+  is reserved for `windows` jobs). Prefer a normal abort; after a hard kill, restart Jenkins once
+  it is idle.
+- **Merged PRs:** the job discards removed branches, so the `PR-<n>` job and its builds disappear
+  after the merge (GitHub keeps the checks). The merged branch itself is then built once as a
+  branch job (Developer plan, never UAT) unless it is deleted; enabling "Automatically delete head
+  branches" avoids that build.
+
 - **PR check fails:** the merge stays blocked. Read the console and JUnit, fix, push (the new build
   supersedes the old one). No retries: a flaky failure is a defect to investigate, not to re-run
   blindly.
@@ -582,7 +599,12 @@ Three kinds of evidence, never to be confused:
 **1. Real Jenkins builds (your Jenkins, earlier pipeline designs):** `main` #1 SUCCESS (image
 `sha256:c0cfd5a7…` built once, QA Smoke 4/4, same image ID promoted to UAT, UAT Smoke 4/4, UAT
 Regression 24/24) and `PR-1` #1 SUCCESS (QA Smoke 4/4, QA Regression 24/24, no UAT), 2026-10-07.
-**The current design has not run on the real Jenkins yet.**
+**Current design on the real Jenkins (2026-10-10):**
+
+| Build                                   | Commit                             | Result                                     | Evidence                                                                                                                                                                                                                                                                                                                                                                                 |
+| --------------------------------------- | ---------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PR-2` #1 (PULL REQUEST, gate-defining) | `8a69de4`                          | SUCCESS, 12.4 min                          | Quality Gates (BDD structure 77/25), Config Check, QA Smoke 4/4, impacted = Regression 24/24, QA Gate, Validation Complete; UAT stages skipped; `Jenkins` check and `pr-head` status success from app 4991392; merge blocked while missing and pending, CLEAN only after success; 0 unredacted values in console and 13 archived files                                                   |
+| `main` #3 (MAIN)                        | `913365d` (PR #2, merged manually) | SUCCESS, 28.2 min incl. the human approval | image `sha256:bb72363e…` built once from `13cc8d4…`; QA Regression 24/24; QA Smoke and PR-only stages skipped; lock released before the approval; approval requested for `viamerico` (1440 min) and answered by `viamerico`; Verify Approved Image; UAT runs the same image ID; UAT Smoke 4/4; deployment record "Identity: MATCH"; 0 unredacted values in console and 14 archived files |
 
 **2. Isolated throwaway Jenkins** (same image `jenkins-jenkins` 2.541.2 and a copy of the same
 plugin set, security off, `--network none`, deleted afterwards; 2026-10-10). Not your Jenkins and

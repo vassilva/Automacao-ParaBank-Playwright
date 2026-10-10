@@ -343,8 +343,8 @@ checked against its approved size (`scripts/ci/verify-suite-coverage.ts`). Known
 a deployment (optional stage on `main`, at most UNSTABLE). Cucumber always runs with one worker and
 no retries. PRs that change gate-defining files (`.github/gate-defining-paths.json`) are merged
 manually; `.github/workflows/gate-guard.yml` turns auto-merge off on them.
-**Status:** the current pipeline has not yet run on the real Jenkins; see the runbook in
-[docs/ci-cd.md](docs/ci-cd.md).
+**Status:** validated on the real Jenkins (PR-2 #1 and main #3, 2026-10-10: PR checks, protected
+merge, QA Regression, manual approval, UAT Smoke); see [docs/ci-cd.md](docs/ci-cd.md).
 
 `.github/workflows/playwright.yml` is a secondary GitHub Actions validation; it is not part of the
 Jenkins model and is reviewed with the Git/GitHub integration.
