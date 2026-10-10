@@ -3,12 +3,16 @@
  *
  *   ts-node scripts/ci/verify-suite-coverage.ts --suite <smoke|sanity|regression|full> --expect <N>
  *   ts-node scripts/ci/verify-suite-coverage.ts --suite <...> --expect <N> <reports dir>
+ *   ts-node scripts/ci/verify-suite-coverage.ts --suite <...> --paths <a.feature,b.feature> <reports dir>
  *
  * 1. Inventory: a Cucumber dry run of the suite's profile (cucumber.js) must select exactly N
  *    scenarios, the approved count. A tag edit that silently adds or drops scenarios fails here,
  *    before anything is deployed (the first form checks only this).
  * 2. Execution (with a reports dir): the run's cucumber-report.json must contain exactly the
  *    suite's inventory, each scenario once, and every scenario passed.
+ *
+ * With --paths (impacted tests, scripts/ci/impacted-tests.ts), the inventory is the suite's profile
+ * restricted to those feature files; it has no approved count, but it must not be empty.
  *
  * Every suite is validated on its own: nothing assumes that suites add up to another suite.
  * The dry run writes its reports to a RELATIVE directory, so no Windows drive letter ever ends up
@@ -53,7 +57,7 @@ function scenarios(reportFile: string) {
   );
 }
 
-function inventory(suite: Suite): Set<string> {
+function inventory(suite: Suite, paths: string[] = []): Set<string> {
   mkdirSync('reports', { recursive: true });
   const dir = path.relative(process.cwd(), mkdtempSync(path.join('reports', '.inventory-')));
   try {
@@ -64,6 +68,7 @@ function inventory(suite: Suite): Set<string> {
         '--profile',
         suite,
         '--dry-run',
+        ...paths,
       ],
       { env: { ...process.env, REPORTS_DIR: dir }, encoding: 'utf8' },
     );
@@ -83,24 +88,37 @@ function option(name: string): string | undefined {
 
 function main(): void {
   const suite = option('--suite') as Suite | undefined;
-  const expectedCount = Number(option('--expect'));
+  const paths = (option('--paths') ?? '').split(',').filter(Boolean);
+  const expectedCount = paths.length > 0 ? undefined : Number(option('--expect'));
   const reportsDir = process.argv
     .slice(2)
     .filter((arg, i, all) => !arg.startsWith('--') && !all[i - 1]?.startsWith('--'))[0];
-  if (!suite || !SUITES.includes(suite) || !Number.isInteger(expectedCount)) {
+  if (
+    !suite ||
+    !SUITES.includes(suite) ||
+    (paths.length === 0 && !Number.isInteger(expectedCount))
+  ) {
     throw new Error(
-      `Usage: verify-suite-coverage.ts --suite <${SUITES.join('|')}> --expect <N> [reports dir]`,
+      `Usage: verify-suite-coverage.ts --suite <${SUITES.join('|')}> (--expect <N> | --paths <files>) [reports dir]`,
     );
   }
 
-  const expected = inventory(suite);
-  if (expected.size !== expectedCount) {
+  const expected = inventory(suite, paths);
+  if (paths.length > 0) {
+    if (expected.size === 0) {
+      throw new Error(`EMPTY SELECTION: "${suite}" selects no scenario in ${paths.join(', ')}.`);
+    }
+  } else if (expected.size !== expectedCount) {
     throw new Error(
       `SUITE INVENTORY MISMATCH: "${suite}" selects ${expected.size} scenarios, the approved ` +
         `count is ${expectedCount}. Review the tag change and the approved counts together.`,
     );
   }
-  console.log(`Suite "${suite}": ${expected.size} scenarios, as approved.`);
+  console.log(
+    paths.length > 0
+      ? `Suite "${suite}" restricted to ${paths.length} feature file(s): ${expected.size} scenarios.`
+      : `Suite "${suite}": ${expected.size} scenarios, as approved.`,
+  );
   if (!reportsDir) return;
 
   const executed = scenarios(path.join(reportsDir, 'cucumber-report.json'));

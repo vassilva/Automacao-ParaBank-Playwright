@@ -1,0 +1,143 @@
+name: Gate-defining change guard
+
+# Enforces the merge policy for gate-defining changes (docs/ci-cd.md): a PR that changes a file
+# listed in .github/gate-defining-paths.json is judged by the very checks it modifies (Jenkins runs
+# the PR's own Jenkinsfile), so a human must review it before it can merge.
+#
+# PREVENTIVE: on every PR head commit this job sets the commit status "gate-review", which the main
+# ruleset requires:
+#   - success: no gate-defining file changed, or a human added the label "gate-change-reviewed";
+#   - failure: a gate-defining file changed and the label is absent.
+# A new commit has no status until this job runs (merge blocked), and the job removes the label on
+# every new commit, so a review covers exactly the commits it saw. Auto-merge of a gate-defining
+# PR without review is therefore impossible, not merely undone afterwards.
+# REACTIVE (courtesy): while such a PR is unreviewed, auto-merge is also turned off with a comment.
+#
+# Trusted by construction: pull_request_target runs THIS file and the pattern list from main, never
+# from the PR. The job never checks out, installs or runs PR code; it reads the PR's file list and
+# labels from the API as data. A PR that edits this workflow or the list changes nothing until it
+# is merged (and both files are gate-defining themselves).
+on:
+  pull_request_target:
+    branches: [main]
+    types:
+      [
+        opened,
+        reopened,
+        synchronize,
+        ready_for_review,
+        edited,
+        labeled,
+        unlabeled,
+        auto_merge_enabled,
+      ]
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: gate-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+env:
+  REVIEW_LABEL: gate-change-reviewed
+
+jobs:
+  guard:
+    name: Gate-defining change guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The base branch (main): only the pattern list is needed.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/gate-defining-paths.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: List the PR's changed files (old and new paths of renames)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/pulls/$PR/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed.txt"
+          echo "$(wc -l < "$RUNNER_TEMP/changed.txt") path(s) changed"
+
+      - name: Match against main's gate-defining list
+        id: match
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const { patterns } = JSON.parse(fs.readFileSync(".github/gate-defining-paths.json", "utf8"));
+            const regexes = patterns.map((p) => new RegExp(p));
+            const files = fs.readFileSync(process.env.RUNNER_TEMP + "/changed.txt", "utf8").split("\n").filter(Boolean);
+            const hits = files.filter((f) => regexes.some((r) => r.test(f)));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "gate=" + (hits.length > 0) + "\n");
+            console.log(hits.length ? "Gate-defining: " + hits.join(", ") : "No gate-defining file changed.");
+          '
+
+      - name: A new commit needs a new review
+        if: steps.match.outputs.gate == 'true' && github.event.action == 'synchronize'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if gh api -X DELETE "repos/$REPO/issues/$PR/labels/$REVIEW_LABEL" >/dev/null 2>&1; then
+            echo "Removed $REVIEW_LABEL: the new commit has not been reviewed."
+          fi
+
+      - name: Set the gate-review status on the PR head
+        id: status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          GATE: ${{ steps.match.outputs.gate }}
+        run: |
+          set -euo pipefail
+          # Current labels from the API (the event payload may predate the removal above).
+          reviewed=$(gh api "repos/$REPO/issues/$PR/labels" --jq "any(.[]; .name == \"$REVIEW_LABEL\")")
+          if [ "$GATE" != "true" ]; then
+            state=success; description="No gate-defining file changed"
+          elif [ "$reviewed" = "true" ]; then
+            state=success; description="Gate-defining change reviewed ($REVIEW_LABEL)"
+          else
+            state=failure; description="Gate-defining change: needs human review (label $REVIEW_LABEL)"
+          fi
+          gh api -X POST "repos/$REPO/statuses/$SHA" -f state="$state" -f context=gate-review \
+            -f description="$description" >/dev/null
+          echo "gate-review = $state on $SHA: $description"
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+
+      - name: Turn auto-merge off on an unreviewed gate-defining PR
+        if: steps.match.outputs.gate == 'true' && steps.status.outputs.state == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          echo "::warning::This PR changes gate-defining files; a human must review it (label $REVIEW_LABEL)."
+          enabled=$(gh pr view "$PR" -R "$REPO" --json autoMergeRequest --jq '.autoMergeRequest != null')
+          if [ "$enabled" = "true" ]; then
+            gh pr merge "$PR" -R "$REPO" --disable-auto
+            {
+              echo "Auto-merge was turned off: this PR changes gate-defining files"
+              echo "(\`.github/gate-defining-paths.json\` on main) and has not been reviewed."
+              echo "The required \`gate-review\` status stays failing until a human reviews the"
+              echo "change and adds the label \`$REVIEW_LABEL\`. See docs/ci-cd.md."
+            } > "$RUNNER_TEMP/comment.md"
+            gh pr comment "$PR" -R "$REPO" --body-file "$RUNNER_TEMP/comment.md"
+            echo "Auto-merge disabled."
+          else
+            echo "Auto-merge is not enabled; nothing to do."
+          fi
