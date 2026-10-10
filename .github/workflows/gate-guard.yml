@@ -1,0 +1,86 @@
+name: Gate-defining change guard
+
+# Enforces the auto-merge policy (docs/ci-cd.md): a PR that changes a gate-defining file
+# (.github/gate-defining-paths.json) is reviewed and merged manually, never auto-merged, because
+# Jenkins validates a PR with the PR's own Jenkinsfile and scripts.
+#
+# Trusted by construction: pull_request_target runs THIS file and the pattern list from main, never
+# from the PR. The job never checks out, installs or runs PR code; it reads the PR's file list from
+# the API as data. A PR that edits this workflow or the list changes nothing until it is merged
+# (manually: both files are gate-defining themselves).
+#
+# Not a required check: a human can still merge such a PR manually once Jenkins passed.
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review, edited, auto_merge_enabled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: gate-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Gate-defining change guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The base branch (main): only the pattern list is needed.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/gate-defining-paths.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: List the PR's changed files (old and new paths of renames)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/pulls/$PR/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed.txt"
+          echo "$(wc -l < "$RUNNER_TEMP/changed.txt") path(s) changed"
+
+      - name: Match against main's gate-defining list
+        id: match
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const { patterns } = JSON.parse(fs.readFileSync(".github/gate-defining-paths.json", "utf8"));
+            const regexes = patterns.map((p) => new RegExp(p));
+            const files = fs.readFileSync(process.env.RUNNER_TEMP + "/changed.txt", "utf8").split("\n").filter(Boolean);
+            const hits = files.filter((f) => regexes.some((r) => r.test(f)));
+            fs.writeFileSync(process.env.RUNNER_TEMP + "/hits.txt", hits.join("\n"));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "gate=" + (hits.length > 0) + "\n");
+            console.log(hits.length ? "Gate-defining: " + hits.join(", ") : "No gate-defining file changed.");
+          '
+
+      - name: Turn auto-merge off on a gate-defining PR
+        if: steps.match.outputs.gate == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          echo "::warning::This PR changes gate-defining files; it must be reviewed and merged manually."
+          enabled=$(gh pr view "$PR" -R "$REPO" --json autoMergeRequest --jq '.autoMergeRequest != null')
+          if [ "$enabled" = "true" ]; then
+            gh pr merge "$PR" -R "$REPO" --disable-auto
+            {
+              echo "Auto-merge was turned off: this PR changes gate-defining files"
+              echo "(\`.github/gate-defining-paths.json\` on main). Review it and merge it manually"
+              echo "once the Jenkins checks pass. See docs/ci-cd.md, Auto-merge policy."
+            } > "$RUNNER_TEMP/comment.md"
+            gh pr comment "$PR" -R "$REPO" --body-file "$RUNNER_TEMP/comment.md"
+            echo "Auto-merge disabled."
+          else
+            echo "Auto-merge is not enabled; nothing to do."
+          fi

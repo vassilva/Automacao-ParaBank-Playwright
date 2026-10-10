@@ -1,0 +1,21 @@
+{
+  "description": "Files that define the merge and deployment gates or the security controls. A PR changing any of them is judged by the checks it modifies (Jenkins runs the PR's own Jenkinsfile), so it is reviewed and merged manually, never auto-merged. Read by scripts/ci/impacted-tests.ts (report) and, from main only, by .github/workflows/gate-guard.yml (enforcement). Patterns are JavaScript regular expressions matched against repository-relative paths.",
+  "patterns": [
+    "^Jenkinsfile$",
+    "^scripts/ci/",
+    "^scripts/audit-test-data\\.ts$",
+    "^scripts/log-redaction\\.ts$",
+    "^src/support/redaction\\.ts$",
+    "^src/support/test-data-audit\\.ts$",
+    "^cucumber\\.js$",
+    "^package(-lock)?\\.json$",
+    "^tsconfig\\.json$",
+    "^playwright/",
+    "^playwright(\\.[a-z-]+)?\\.config(\\.base)?\\.ts$",
+    "^docker/ci-agent/",
+    "^eslint\\.config\\.mjs$",
+    "^\\.prettier(rc\\.json|ignore)$",
+    "^\\.github/",
+    "^docs/github-ruleset-main\\.json$"
+  ]
+}

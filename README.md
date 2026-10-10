@@ -331,15 +331,20 @@ locator assertions, URLs, and the specific network responses each page action wa
 **Jenkins is the CI/CD** (Multibranch Pipeline, `Jenkinsfile`); see [docs/ci-cd.md](docs/ci-cd.md).
 ParaBank is built **once** per pipeline and QA and UAT run that image by ID:
 
-| Event        | Test plan                                                                                                                          |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Push         | By branch prefix: `feature/*` QA Smoke (4); `qa/*` QA Impacted Tests; `config/*` Quality Gates + Config Check only (no deployment) |
-| Pull request | Quality gates → build image → deploy QA → QA Smoke (4) → QA Impacted Tests = the required `Jenkins` check; auto-merge per PR       |
-| `main`       | Quality gates → build image → deploy QA → QA Regression (24) → **manual Jenkins approval** → same image ID to UAT → UAT Smoke (4)  |
+| Event        | Test plan                                                                                                                                                                                                                 |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Push         | By branch prefix: `feature/*` QA Smoke (4); `qa/*` QA Impacted Tests; `config/*` Quality Gates + Config Check only (no deployment)                                                                                        |
+| Pull request | Quality gates → config check → build image → deploy QA → QA Smoke (4) → QA Impacted Tests → completeness check = the required `Jenkins` check + `pr-head` status; auto-merge only per PR, never for gate-defining changes |
+| `main`       | Quality gates → build image → deploy QA → QA Regression (24) → **manual Jenkins approval** → same image ID to UAT → UAT Smoke (4)                                                                                         |
 
-Each suite run is checked against its approved size (`scripts/ci/verify-suite-coverage.ts`). Known
-defects never gate a deployment (optional stage on `main`, at most UNSTABLE). Cucumber always runs
-with one worker and no retries.
+Quality gates on every push and PR: lint, format, typecheck, strict dry run, test-data audit, BDD
+structure check (`scripts/ci/verify-bdd-structure.ts`) and the suite inventories. Each suite run is
+checked against its approved size (`scripts/ci/verify-suite-coverage.ts`). Known defects never gate
+a deployment (optional stage on `main`, at most UNSTABLE). Cucumber always runs with one worker and
+no retries. PRs that change gate-defining files (`.github/gate-defining-paths.json`) are merged
+manually; `.github/workflows/gate-guard.yml` turns auto-merge off on them.
+**Status:** the current pipeline has not yet run on the real Jenkins; see the runbook in
+[docs/ci-cd.md](docs/ci-cd.md).
 
 `.github/workflows/playwright.yml` is a secondary GitHub Actions validation; it is not part of the
 Jenkins model and is reviewed with the Git/GitHub integration.

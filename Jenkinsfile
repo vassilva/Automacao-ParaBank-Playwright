@@ -30,13 +30,17 @@
 // the PR/branch head when it starts and again once it holds the host lock, and ends ABORTED
 // otherwise. It never uses a milestone: a build cancelled by a milestone ends NOT_BUILT, which the
 // checks plugin publishes as a "skipped" Jenkins check, and GitHub counts a skipped (or neutral)
-// required check as passing. For the same reason any NOT_BUILT build is turned into ABORTED and,
-// on PR and branch builds, UNSTABLE into FAILURE (see the pipeline post section).
+// required check as passing. For the same reason, on PR and branch builds, UNSTABLE becomes
+// FAILURE (see the pipeline post section).
 // On main (milestones), builds run to QA Regression in order (host lock); a build
 // that reaches the approval aborts any older build still waiting for approval, an older build can
 // no longer request or pass approval once a newer one did, and a build already approved and
 // deploying to UAT is never interrupted. Verify Approved Image also aborts (SUPERSEDED) unless the
 // build's commit is still main's head, so only the latest validated image can reach UAT.
+// A main build cancelled by the milestone ends NOT_BUILT WITHOUT running any post section
+// (verified): its "Jenkins" check on that main commit shows "skipped" (main's checks gate nothing)
+// and its build image tag (parabank-ci:main-<n>-*) is left behind; it can never be promoted (a
+// promotion uses the build's own image ID after its own approval). Cleanup: docs/ci-cd.md.
 //
 // BUILD ONCE, PROMOTE THE SAME IMAGE: ParaBank is built once per pipeline from the pinned official
 // source commit (docker/parabank/source.env), with its own 239 tests. QA and UAT run that image by
@@ -176,6 +180,9 @@ pipeline {
     REGRESSION_EXPECTED = '24'
     SANITY_EXPECTED = '10'
     FULL_EXPECTED = '52'
+    // Whole inventory (Full + known defects) and the known defects, for the BDD structure check.
+    TOTAL_SCENARIOS_EXPECTED = '77'
+    KNOWN_DEFECTS_EXPECTED = '25'
   }
 
   stages {
@@ -279,6 +286,7 @@ pipeline {
               npm run typecheck
               npm run test:dry-run
               npm run -s audit:test-data
+              npm run -s ci:bdd -- --total "$TOTAL_SCENARIOS_EXPECTED" --known-defects "$KNOWN_DEFECTS_EXPECTED"
               npm run -s ci:coverage -- --suite smoke --expect "$SMOKE_EXPECTED"
               npm run -s ci:coverage -- --suite regression --expect "$REGRESSION_EXPECTED"
               npm run -s ci:coverage -- --suite sanity --expect "$SANITY_EXPECTED"
@@ -803,13 +811,8 @@ pipeline {
         }
       }
     }
-    // NOT_BUILT (e.g. a main build cancelled by the approval milestone) becomes ABORTED, which is
-    // never a passing check, and the build's image tag is removed as for any abort.
-    notBuilt {
-      script {
-        currentBuild.result = 'ABORTED'
-        removeBuildImageTag()
-      }
-    }
+    // No 'notBuilt' handler: a build cancelled by a milestone (the only source of NOT_BUILT here,
+    // main builds at the approval) is interrupted without running any post section, as verified on
+    // a Jenkins with these plugins; such a handler would never run. See SUPERSEDING in the header.
   }
 }

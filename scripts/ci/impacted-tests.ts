@@ -21,7 +21,7 @@
  *                                            -> nothing beyond the PR's Smoke
  *   - anything the map does not know         -> the Regression suite (fail-safe)
  * Known-defect scenarios are never selected (the "full" profile excludes them). Changes to the
- * files that define the gates are also reported as GATE-DEFINING (see GATE_DEFINING).
+ * files that define the gates are also reported as GATE-DEFINING (.github/gate-defining-paths.json).
  *
  * `run` executes the selection on the target configured by TARGET_ENV / PARABANK_BASE_URL with
  * reports in reports/<env>/impacted, then checks that exactly the selected scenarios ran, once,
@@ -118,7 +118,7 @@ const RULES: [RegExp, Impact | 'self', string][] = [
   [/^(Jenkinsfile|scripts\/|docker\/ci-agent\/|\.gitattributes$)/, REGRESSION, 'CI/CD tooling'],
   // No functional impact beyond the PR's Smoke.
   [/^docs\/|\.md$/, NONE, 'documentation'],
-  [/^\.github\//, NONE, 'secondary GitHub Actions workflow'],
+  [/^\.github\//, NONE, 'GitHub workflows and guard configuration'],
   [
     /^(\.gitignore|\.prettierignore|\.prettierrc\.json|eslint\.config\.mjs|\.env\.example)$/,
     NONE,
@@ -127,24 +127,17 @@ const RULES: [RegExp, Impact | 'self', string][] = [
 ];
 
 /**
- * Files that define the gates themselves. A PR changing them is validated by the gates it changes
- * (Jenkins runs the PR's own Jenkinsfile), so it must be reviewed and merged manually, never
- * auto-merged (docs/ci-cd.md). Reported, not enforced: enforcement must come from GitHub.
+ * Files that define the gates and security controls (.github/gate-defining-paths.json, the single
+ * list). A PR changing them is validated by the gates it changes (Jenkins runs the PR's own
+ * Jenkinsfile), so it is reviewed and merged manually. Here they are only reported; the
+ * enforcement is .github/workflows/gate-guard.yml, which reads main's copy of the list and turns
+ * auto-merge off on such PRs.
  */
-const GATE_DEFINING = [
-  /^Jenkinsfile$/,
-  /^scripts\/ci\//,
-  /^scripts\/audit-test-data\.ts$/,
-  /^cucumber\.js$/,
-  /^package(-lock)?\.json$/,
-  /^tsconfig\.json$/,
-  /^playwright\//,
-  /^playwright(\.[a-z-]+)?\.config(\.base)?\.ts$/,
-  /^docker\/ci-agent\//,
-  /^eslint\.config\.mjs$/,
-  /^\.prettier(rc\.json|ignore)$/,
-  /^docs\/github-ruleset-main\.json$/,
-];
+const GATE_DEFINING: RegExp[] = (
+  JSON.parse(readFileSync(path.join('.github', 'gate-defining-paths.json'), 'utf8')) as {
+    patterns: string[];
+  }
+).patterns.map((pattern) => new RegExp(pattern));
 
 function git(args: string[]): string {
   const result = spawnSync('git', ['-c', 'safe.directory=*', ...args], { encoding: 'utf8' });
@@ -225,6 +218,8 @@ export function classify(base: string, changed: string[]): Selection {
       selection.changed.push({ file, impact: 'none', reason });
     }
   }
+  // A change to the gates themselves always gets the strongest QA suite.
+  if (selection.gateDefining.length > 0) selection.kind = 'regression';
   if (selection.kind !== 'regression' && files.size > 0) {
     selection.kind = 'features';
     selection.features = [...files].sort();
