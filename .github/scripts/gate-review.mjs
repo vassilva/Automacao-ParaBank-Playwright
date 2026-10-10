@@ -1,16 +1,16 @@
 // Decision of the required "gate-review" status (.github/workflows/gate-guard.yml). Pure function
 // plus a small CLI; the workflow runs this file from main, never from the PR.
 //
-// Policy (docs/ci-cd.md): a PR that changes a gate-defining file (.github/gate-defining-paths.json)
-// is judged by the checks it modifies, so it needs a human review AND a human merge:
-//   - never mergeable while auto-merge is enabled on it (auto-merge must not be the action that
-//     merges it, even after review);
+// Policy (docs/ci-cd.md): every merge into main is a manual merge by the repository owner (auto-merge
+// is disabled for the repository; a "restrict updates" ruleset admits only admins, via a PR). A PR
+// that changes a gate-defining file (.github/gate-defining-paths.json) is judged by the checks it
+// modifies, so it also needs a human review:
 //   - never mergeable without the review label;
-//   - "success" only as the LAST required signal: after Jenkins passed on this exact head commit,
-//     with the label present and auto-merge off. GitHub refuses to enable auto-merge on a PR that
-//     is already mergeable, so from then on only a human merge is possible.
+//   - "success" only as the LAST required signal: after Jenkins passed on this exact head commit;
+//   - defense in depth: "failure" while auto-merge is enabled on it, should auto-merge ever be
+//     re-enabled for the repository.
 // Any missing or unreadable input makes the status "failure" (fail closed).
-// Ordinary PRs: "success" (auto-merge stays available; Jenkins checks still gate the merge).
+// Ordinary PRs: "success" (the Jenkins checks still gate the merge).
 import process from 'node:process';
 
 /**

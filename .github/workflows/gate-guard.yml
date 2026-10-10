@@ -3,15 +3,16 @@ name: Gate-defining change guard
 # Sets the required commit status "gate-review" on every PR head (decision:
 # .github/scripts/gate-review.mjs). For a PR that changes a gate-defining file
 # (.github/gate-defining-paths.json) it is "success" only after a human review (label
-# gate-change-reviewed), after Jenkins passed on that exact commit, and while auto-merge is OFF;
-# it is "failure" whenever auto-merge is enabled. Auto-merge therefore never merges a
-# gate-defining PR: a human does. Ordinary PRs get "success" and may use auto-merge, still gated
-# by the Jenkins checks.
+# gate-change-reviewed) and after Jenkins passed on that exact commit; ordinary PRs get "success"
+# (the Jenkins checks still gate them). Every merge into main is a manual merge by the repository
+# owner: auto-merge is disabled for the repository and a "restrict updates" ruleset lets only
+# repository admins update main, via a pull request (docs/ci-cd.md). The guard never merges and
+# cannot: it has no write access to code.
 #
-# Why a required status and not "disable auto-merge": the workflow token cannot disable
-# auto-merge without contents: write ("Resource not accessible by integration
-# (disablePullRequestAutoMerge)"), and granting write access to code to a pull_request_target
-# workflow is not worth it. The status blocks the merge on GitHub's side (fail closed).
+# Defense in depth: should auto-merge ever be re-enabled, "gate-review" is "failure" on a
+# gate-defining PR while auto-merge is enabled on it. (Turning auto-merge off from here is not
+# possible: the workflow token would need contents: write, "Resource not accessible by
+# integration (disablePullRequestAutoMerge)", which this guard deliberately does not get.)
 #
 # Trusted by construction: pull_request_target and status workflows run THIS file and the scripts
 # it reads from main, never from the PR. Nothing from the PR is checked out or executed; file

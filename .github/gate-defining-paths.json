@@ -16,6 +16,6 @@
     "^eslint\\.config\\.mjs$",
     "^\\.prettier(rc\\.json|ignore)$",
     "^\\.github/",
-    "^docs/github-ruleset-main\\.json$"
+    "^docs/github-ruleset-main.*\\.json$"
   ]
 }

@@ -1,9 +1,9 @@
 /**
  * Executable model of the Jenkinsfile for tests: stages in file order, each with its own `when`
- * expression (evaluated as written, Groovy == / != mapped to JS), the flags each stage sets, and
- * the nesting of the UAT Deployment sub-stages. Stage failures, approval answers, head moves and
- * the application-image decision are injected. A model, not Jenkins: real Jenkins runs are the
- * evidence for runtime behavior (docs/ci-cd.md, Validation status).
+ * expression (evaluated as written, Groovy == / != mapped to JS) and the flags each stage sets.
+ * Stage failures, skips, head moves, the application-image decision and the UAT state are
+ * injected. A model, not Jenkins: real Jenkins runs are the evidence for runtime behavior
+ * (docs/ci-cd.md, Validation status).
  */
 import { readFileSync } from 'node:fs';
 
@@ -17,26 +17,18 @@ export interface Injection {
   fail?: string;
   skip?: string;
   appImage?: 'REUSE' | 'DEPLOY' | 'BUILD';
-  approval?: 'approve' | 'reject' | 'timeout' | 'unauthorized' | 'superseded';
-  headMovedBeforeVerify?: boolean;
+  /** UAT already runs the validated image ID (healthy): no UAT deployment needed. */
+  uatRunsValidatedImage?: boolean;
+  /** main moved on before the UAT promotion (a newer main build will promote). */
+  headMovedBeforePromotion?: boolean;
+  /** The pipeline lock could not be acquired within the bounded wait. */
+  lockTimeout?: boolean;
 }
 
 export interface Run {
   result: string;
   ran: string[];
 }
-
-const UAT_SUBSTAGES = [
-  'UAT Workspace Guard',
-  'UAT Install',
-  'UAT Host Lock',
-  'Verify Approved Image',
-  'Promote to UAT',
-  'UAT Ready',
-  'UAT Smoke',
-  'Known Defects',
-  'Deployment Record',
-];
 
 export function loadStages(file = 'Jenkinsfile'): {
   stages: Stage[];
@@ -91,7 +83,6 @@ export function simulate(branch: string, changeId: string | null, inject: Inject
   const env = context(branch, changeId);
   const params = { ADDITIONAL_QA_SUITE: 'none', RUN_KNOWN_DEFECTS: false };
   const ran: string[] = [];
-  let parentRuns = true;
   for (const s of stages) {
     const expr = s.when?.replace(/==/g, '===').replace(/!=(?!=)/g, '!==');
     // The model evaluates the Jenkinsfile's own `when` expressions (repository content, not input).
@@ -102,12 +93,13 @@ export function simulate(branch: string, changeId: string | null, inject: Inject
           params,
         )
       : true;
-    if (UAT_SUBSTAGES.includes(s.name) && !parentRuns) go = false;
-    if (s.name === 'UAT Deployment') parentRuns = go;
     if (inject.skip === s.name) go = false;
     if (!go) continue;
     ran.push(s.name);
     if (inject.fail === s.name) return { result: `FAILURE at ${s.name}`, ran };
+    if (s.name === 'Acquire Pipeline Lock' && inject.lockTimeout) {
+      return { result: 'FAILURE (pipeline lock not acquired)', ran };
+    }
     if (s.name === 'Resolve Application Image') env.APP_IMAGE_ACTION = inject.appImage ?? 'BUILD';
     if (
       s.name === 'QA Gate' &&
@@ -116,26 +108,16 @@ export function simulate(branch: string, changeId: string | null, inject: Inject
     ) {
       return { result: 'FAILURE at QA Gate', ran };
     }
+    if (s.name === 'UAT Promotion') {
+      if (inject.headMovedBeforePromotion) return { result: 'ABORTED (SUPERSEDED)', ran };
+      env.UAT_DEPLOY_REQUIRED = inject.uatRunsValidatedImage ? 'false' : 'true';
+    }
     if (s.name === 'Validation Complete') {
       const req = required[env.PIPELINE_ROLE ?? ''];
       const missing = req ? req.filter((f) => env[f] !== 'true') : ['(no plan)'];
-      if (
-        !req ||
-        (env.BUILD_MODE === 'PULL REQUEST' && env.PIPELINE_ROLE !== 'CI') ||
-        missing.length
-      ) {
+      if (!req || missing.length) {
         return { result: `FAILURE at Validation Complete (${missing.join(',')})`, ran };
       }
-    }
-    if (s.name === 'UAT Approval') {
-      const a = inject.approval ?? 'approve';
-      if (a === 'unauthorized') return { result: 'FAILURE (approver not allowed)', ran };
-      if (a === 'reject' || a === 'timeout') return { result: `ABORTED (${a})`, ran };
-      if (a === 'superseded') return { result: 'NOT_BUILT (superseded at approval)', ran };
-      env.UAT_APPROVED = 'true';
-    }
-    if (s.name === 'Verify Approved Image' && inject.headMovedBeforeVerify) {
-      return { result: 'ABORTED (SUPERSEDED)', ran };
     }
     for (const f of s.sets) env[f] = 'true';
   }
