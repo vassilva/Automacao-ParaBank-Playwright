@@ -1,52 +1,232 @@
-# CI/CD: role validation, PR checks, auto-merge, QA Regression, approval, UAT Smoke
+# CI/CD: PR Smoke, manual merge, QA Regression, automatic UAT promotion, UAT Smoke
 
-One `Jenkinsfile`, one **Multibranch Pipeline**. Every build that deploys creates the ParaBank image
-exactly once and the environments run that image by ID. The target flow is:
+One `Jenkinsfile`, one **Multibranch Pipeline**, one pipeline at a time. The definitive flow:
 
 ```
-Developer / QA / Configurator ─> push ─> role-specific validation ─> Pull Request
-  ─> Quality Gates + QA Smoke (4) + QA Impacted Tests  (= the required "Jenkins" check)
-  ─> GitHub auto-merge (enabled per eligible PR, merges only after the check passed)
-  ─> main: automatic QA deployment ─> QA Regression (24) ─> mandatory manual Jenkins approval
-  ─> UAT deployment (same image ID) ─> UAT Smoke (4)
+LOCAL DEVELOPMENT (tests written and run against QA) ─> PUSH TO A FEATURE BRANCH ─> PULL REQUEST
+  ─> QUALITY GATES ─> QA SMOKE (4)                     = the required checks (failures block)
+  ─> MANUAL MERGE by the repository owner in GitHub    (no auto-merge, no automation merges)
+  ─> QA REGRESSION (24, once, on QA)                   = the gate before UAT
+  ─> AUTOMATIC UAT PROMOTION of the validated image    (no manual approval)
+  ─> UAT SMOKE (4) ─> SUCCESS
 ```
 
 ```
 PUSH, by branch prefix (a branch with an open PR is built as the PR only):
-  feature/*, others  DEVELOPER     QUALITY GATES ─> BUILD IMAGE ─> DEPLOY QA ─> QA READY ─> QA SMOKE (4)
-  qa/*               QA            QUALITY GATES ─> BUILD IMAGE ─> DEPLOY QA ─> QA READY ─> QA IMPACTED TESTS
-  config/*           CONFIGURATOR  QUALITY GATES ─> CONFIG CHECK          (no image, no deployment, no lock)
+  feature/*, others  DEVELOPER     QUALITY GATES ─> APP IMAGE ─> QA READY ─> QA SMOKE (4)
+  qa/*               QA            QUALITY GATES ─> APP IMAGE ─> QA READY ─> QA IMPACTED TESTS
+  config/*           CONFIGURATOR  QUALITY GATES ─> CONFIG CHECK          (no image, no deployment)
 
-PULL REQUEST (CI)  QUALITY GATES ─> BUILD IMAGE ─> DEPLOY QA ─> QA READY ─> QA SMOKE (4) ─> QA IMPACTED TESTS
-                   = the "Jenkins" check GitHub requires before a merge or an auto-merge
+PULL REQUEST (CI)  QUALITY GATES ─> CONFIG CHECK ─> APP IMAGE ─> QA READY ─> QA SMOKE (4)
+                     ─> QA IMPACTED TESTS (feature level only; a Regression-level selection is
+                        deferred to main) ─> QA GATE ─> VALIDATION COMPLETE
+                   = the "Jenkins" check + "pr-head" status. Never Regression, never UAT.
 
-MAIN (CD)          QUALITY GATES ─> BUILD IMAGE ─> DEPLOY QA ─> QA READY ─> QA REGRESSION (24)
-                     ─> UAT APPROVAL (input; authorized approver; timeout; supersedes older waiting builds)
-                     ─> VERIFY APPROVED IMAGE (still main's head) ─> PROMOTE SAME IMAGE ID ─> UAT READY
-                     ─> UAT SMOKE (4) [─> KNOWN DEFECTS (optional, never gating)] ─> DEPLOYMENT RECORD
+MAIN (CD)          QUALITY GATES ─> APP IMAGE ─> QA READY ─> QA REGRESSION (24, once)
+                     ─> UAT PROMOTION (main's head, image ID, revision, inputs digest; fail-closed)
+                     ─> DEPLOY UAT (only if UAT does not already run that image ID)
+                     ─> UAT READY (identity = validated image) ─> UAT SMOKE (4)
+                     [─> KNOWN DEFECTS (optional, never gating)] ─> DEPLOYMENT RECORD
+                     ─> VALIDATION COMPLETE
+
+APP IMAGE = RESOLVE ─> [BUILD, only if no image from these inputs exists] ─> VERIFY
+            ─> [DEPLOY QA, only if QA runs another image] (see "Application image")
+EVERY BUILD: WORKSPACE GUARD ─> ACQUIRE PIPELINE LOCK ─> ... ─> (post) RELEASE PIPELINE LOCK
 ```
 
 ```
-QA REGRESSION ──fail──> FAILURE (no approval requested, nothing deployed to UAT)
-      │ pass
+QA REGRESSION ──fail / skipped──> FAILURE (no UAT stage runs)
+      │ 24/24
       ▼
-UAT APPROVAL ──reject / timeout / abort / superseded──> ABORTED (nothing deployed to UAT)
-      │       ──not an authorized approver / approvers not configured──> FAILURE (nothing deployed)
-      │ approved by an authorized approver
+UAT PROMOTION ──main moved on──> ABORTED "SUPERSEDED" (a newer main build promotes)
+      │       ──head unreadable / image ID, revision or digest mismatch──> FAILURE (nothing deployed)
       ▼
-VERIFY ──main moved on──> ABORTED "SUPERSEDED" (nothing deployed)
-      │
-      ▼
-PROMOTE ─> UAT READY ─> UAT SMOKE ──fail──> FAILURE (no deployment record)
-                            │ pass 4/4
-                            ▼
-                         SUCCESS
+DEPLOY UAT (if needed) ─> UAT READY ─> UAT SMOKE ──fail──> FAILURE (no deployment record)
+                                          │ 4/4
+                                          ▼
+                                VALIDATION COMPLETE ─> SUCCESS
 ```
 
-A Pull Request never deploys to UAT. The main pipeline runs no QA Smoke and no UAT Regression; it
-is SUCCESS only if UAT Smoke and its count check pass. Auto-merge changes only **who clicks merge**
-(GitHub, once the required check passed): every gate after the merge is unchanged, and nothing
-reaches UAT without the manual Jenkins approval.
+A Pull Request never runs the Regression suite and never deploys to UAT. `main` runs QA Regression
+exactly once per promotion attempt, no QA Smoke and no UAT Regression; it is SUCCESS only when QA
+Regression, the promotion checks, UAT readiness and UAT Smoke all passed (Validation Complete).
+
+**UAT promotion policy (deterministic):** after a passing Regression, UAT is deployed **only if it
+does not already run the exact validated image ID** (healthy). A test-only or documentation merge
+keeps the same application image (see "Application image"), so UAT is not redeployed; it is still
+verified (identity) and smoke-tested with the merged tests. A merge that changes the application
+inputs produces a new image, validated by QA Regression and then deployed to UAT. The post-merge
+Regression gate always runs.
+
+## Merge policy and GitHub protection
+
+Repository: https://github.com/vassilva/Automacao-ParaBank-Playwright (public, owned by a user
+account; `main` is the default branch). Every merge into `main` is a **manual merge by the
+repository owner in the GitHub interface**, after the required checks passed. Nothing merges
+automatically.
+
+| Control                | Setting (verified through the GitHub API)                                                                                                                                                                                                                                                       |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auto-merge             | **disabled** for the repository (`allow_auto_merge: false`): it cannot be enabled on any PR                                                                                                                                                                                                     |
+| Ruleset `24842741`     | [`github-ruleset-main.json`](github-ruleset-main.json): PR required; no deletion; no force-push; required `Jenkins` and `continuous-integration/jenkins/pr-head` (app 4991392) and `gate-review` (GitHub Actions, app 15368) on a branch **up to date** with `main`; no bypass (owner: `never`) |
+| Ruleset `24856083`     | [`github-ruleset-main-owner-merge.json`](github-ruleset-main-owner-merge.json): **restrict updates** of `main`; only repository admins bypass it, and only through a PR (owner: `pull_requests_only`)                                                                                           |
+| Collaborators          | the owner only (`vassilva`, admin)                                                                                                                                                                                                                                                              |
+| Workflow token default | read-only; workflows cannot approve PRs                                                                                                                                                                                                                                                         |
+
+Two rulesets on purpose: a bypass applies per ruleset, so the owner's PR-only bypass of "restrict
+updates" never lets anyone skip the required checks of the other ruleset. Together: no direct or
+force push to `main`; a merge needs a PR with all three required signals passed on an up-to-date
+head; and only a repository admin (today: only the owner) can perform it. **Automation cannot
+merge:** Jenkins never merges (its GitHub App only publishes checks and statuses, and it is not a
+bypass actor); `gate-guard.yml` has no write access to code; `playwright.yml` is manual and
+read-only; there are no other workflows and no other apps with a bypass.
+
+**Limits (stated, not hidden):** GitHub enforces "repository admins", not a named person: today the
+owner is the only admin, and adding another admin would give that person the same merge right.
+Required approving reviews stay at 0, because a single maintainer cannot approve their own PR.
+The owner can still edit or disable rulesets (an administrative action outside any PR).
+
+### Required signals and what GitHub counts as passing
+
+Read from the installed plugins (checks-api 402, github-branch-source 1967) and observed on real
+builds:
+
+| Jenkins result | `Jenkins` check run                         | `pr-head` commit status | Merge                                                  |
+| -------------- | ------------------------------------------- | ----------------------- | ------------------------------------------------------ |
+| SUCCESS        | success                                     | success                 | allowed (with `gate-review`)                           |
+| UNSTABLE       | neutral (if configured) or failure          | failure                 | blocked (PR UNSTABLE is turned into FAILURE anyway)    |
+| FAILURE        | failure                                     | error                   | blocked                                                |
+| NOT_BUILT      | skipped                                     | error                   | blocked by the status (the pipeline never produces it) |
+| ABORTED        | failure (observed on a superseded PR build) | error                   | blocked                                                |
+| running        | in progress                                 | pending                 | blocked                                                |
+
+GitHub counts a skipped or neutral required **check** as passing, but a commit **status** passes
+only when `success`; requiring both signals closes that gap. A missing signal blocks the merge.
+
+### gate-review: human review for gate-defining changes
+
+`.github/workflows/gate-guard.yml` runs from `main` (`pull_request_target`, and `status` when
+Jenkins reports `pr-head`; a PR cannot change it) and sets the required status `gate-review` with
+`.github/scripts/gate-review.mjs`:
+
+| PR                                                                                             | review label `gate-change-reviewed` | Jenkins on this commit | `gate-review`          |
+| ---------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------- | ---------------------- |
+| ordinary                                                                                       | –                                   | –                      | success                |
+| gate-defining                                                                                  | absent                              | any                    | failure (needs review) |
+| gate-defining                                                                                  | present                             | not yet passed         | pending                |
+| gate-defining                                                                                  | present                             | passed                 | success                |
+| guard cannot read the PR (API, permission)                                                     | –                                   | –                      | failure (fail closed)  |
+| gate-defining with auto-merge enabled (defense in depth, should auto-merge ever be re-enabled) | any                                 | any                    | failure                |
+
+Gate-defining files are listed in `.github/gate-defining-paths.json` (Jenkinsfile, `scripts/ci/**`,
+`.github/**`, ruleset files, redaction and test-data controls, runner configuration and
+dependencies, the Playwright adapter, the CI agent image, lint and format configuration). Every new
+commit removes the label. **Permission finding:** the earlier guard tried to turn auto-merge off and
+GitHub answered "Resource not accessible by integration (disablePullRequestAutoMerge)": that
+mutation needs `contents: write`, which this `pull_request_target` workflow deliberately does not
+get. The obsolete operation was removed; protection comes from the required status, the disabled
+auto-merge and the "restrict updates" ruleset, not from a token permission. Residual limit: anyone
+with write access (today only the owner) can add the label or write a workflow that posts a
+`gate-review` status; this protects against unattended changes, not against a malicious admin.
+
+### Jenkins job and GitHub discovery
+
+Multibranch Pipeline `Automacao-ParaBank-Playwright` (GitHub Branch Source, GitHub App credential
+`github-app-qa-automation`, app 4991392). Discovery: branches excluding those filed as PRs; PRs
+from this repository at their head revision (no fork PRs). The local Jenkins is not reachable from
+GitHub, so discovery is a **periodic scan every 2 minutes**; a scan only builds heads whose revision
+changed. The job discards removed branches (a merged PR's `PR-<n>` job disappears with its builds;
+GitHub keeps the checks).
+
+## Stages, in execution order
+
+| #    | Stage                                                   |        PR         |       push       |   main    | What it does                                                                                                                                                     |
+| ---- | ------------------------------------------------------- | :---------------: | :--------------: | :-------: | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | Build Context                                           |         ✓         |        ✓         |     ✓     | Mode (`CHANGE_ID` → PR; `main` → MAIN; else PUSH), role by prefix, plan, build tag (no executor)                                                                 |
+| 2    | **Serialized Pipeline**                                 |         ✓         |        ✓         |     ✓     | ONE agent block for all the work below; timeout 300 min                                                                                                          |
+| 2.1  | ↳ Workspace Guard                                       |         ✓         |        ✓         |     ✓     | Clean reports, no `.env`, 1 worker, 0 retries                                                                                                                    |
+| 2.2  | ↳ Acquire Pipeline Lock                                 |         ✓         |        ✓         |     ✓     | Global lock (bounded wait); then superseded commit → ABORTED                                                                                                     |
+| 2.3  | ↳ Install, Quality Gates                                |         ✓         |        ✓         |     ✓     | `npm ci`; lint, format, typecheck, strict dry run, test-data audit, `test:ci` (pipeline/merge-policy tests), BDD structure (77/25), suite inventories 4/10/24/52 |
+| 2.4  | ↳ Config Check                                          |         ✓         |     config/*     |     –     | Compose for QA/UAT, `source.env`, `.env.example`                                                                                                                 |
+| 2.5  | ↳ Resolve / Build / Verify Application Image, Deploy QA |         ✓         | ✓ (not config/*) |     ✓     | REUSE / DEPLOY / BUILD (see "Application image"); revision and inputs digest checked                                                                             |
+| 2.6  | ↳ QA Ready                                              |         ✓         |        ✓         |     ✓     | Healthy, database initialized, QA runs exactly the image ID                                                                                                      |
+| 2.7  | ↳ QA Smoke                                              |         ✓         |    feature/*     |     –     | 4/4 executed once and passed                                                                                                                                     |
+| 2.8  | ↳ QA Impacted Tests                                     | ✓ (feature level) |       qa/*       |     –     | Selection from the changed files; Regression-level deferred on PRs                                                                                               |
+| 2.9  | ↳ QA Gate                                               |         ✓         |        ✓         |     –     | Fails unless the role's suites ran                                                                                                                               |
+| 2.10 | ↳ QA Regression                                         |         –         |        –         |     ✓     | 24/24 executed once and passed: the gate before UAT                                                                                                              |
+| 2.11 | ↳ UAT Promotion                                         |         –         |        –         |     ✓     | Fail-closed checks; decides whether UAT needs the deployment                                                                                                     |
+| 2.12 | ↳ Deploy UAT                                            |         –         |        –         | if needed | Same image ID, no rebuild                                                                                                                                        |
+| 2.13 | ↳ UAT Ready, UAT Smoke                                  |         –         |        –         |     ✓     | Identity = validated image; 4/4                                                                                                                                  |
+| 2.14 | ↳ Known Defects                                         |         –         |        –         |    opt    | `RUN_KNOWN_DEFECTS`; at most UNSTABLE                                                                                                                            |
+| 2.15 | ↳ Deployment Record                                     |         –         |        –         |     ✓     | `deployment/deployment-record.txt` (deployed or already running)                                                                                                 |
+| post | release the lock                                        |         ✓         |        ✓         |     ✓     | Junit, environment logs (redacted), pointers, build tag removal, **lock release**, archive                                                                       |
+| 3    | Validation Complete                                     |         ✓         |        ✓         |     ✓     | Fails unless every flag of the plan is set (main: Regression, promotion, UAT ready, UAT Smoke)                                                                   |
+
+## Strict serialization (one pipeline at a time)
+
+Every build of the job (PR, `main`, branch push) runs all its work inside one agent block whose
+first step after the workspace guard is the **global pipeline lock**
+(`scripts/ci/pipeline-lock.sh`), released in that block's `post` section on SUCCESS, FAILURE,
+ABORTED and timeout. Therefore:
+
+- only one pipeline executes at a time, across all branches and PRs (a per-branch lock would not
+  be enough); a PR can never change QA while `main` runs Regression or promotes UAT;
+- the holder never needs a second executor (QA and UAT run in the same agent block, nothing
+  allocates a node after the lock), so builds waiting for the lock cannot deadlock it;
+- **queueing:** a build waiting for the lock occupies one executor (the built-in node has 2) and
+  polls every 15 s, naming the holder; further builds stay in the Jenkins queue without an
+  executor. Waiting is bounded (`PARABANK_LOCK_WAIT_MINUTES`, 180): then the build fails;
+- **release:** plain `sh` + Docker CLI, so it works even when `npm ci` failed; owner-scoped (a build
+  can only release its own lock); idempotent;
+- **stale locks:** a lock older than 330 min (longer than the 300-min pipeline timeout) can only
+  belong to a build that died without its `post` section (Jenkins crash, hard kill); the next
+  waiter removes it loudly. Nobody needs to remove an active lock by hand;
+- **outdated images:** after taking the lock, a build whose commit is no longer the head of its PR
+  or branch ends ABORTED; before UAT, `main`'s head is checked again (fail-closed), so a queued
+  older `main` build can never promote an outdated image.
+
+The lock is an atomic Docker network (60 concurrent creates of one name produced exactly one) with
+owner and time labels, compatible with the previous `host-lock.ts`. Not covered: Jenkins builds the
+small CI agent image (`docker/ci-agent`, normally cached) before entering the agent block. A
+Jenkins-native alternative (Lockable Resources plugin, `options { lock(...) }`, waiting without an
+executor) would need a plugin installation by the Jenkins administrator; it is not installed.
+Tested locally (`npm run test:lock`, on a throwaway lock name): waiting, release, owner-only
+release, bounded wait, stale recovery, and 5 concurrent pipelines strictly one at a time.
+
+## Gates
+
+1. Stages run in sequence: a failing suite or count check fails its stage and the build; every
+   later stage is skipped.
+2. Each later step requires the previous gate's own flag, set only as the last statement of its
+   stage: UAT Promotion requires `QA_REGRESSION_PASSED`; Deploy UAT and UAT Ready require
+   `UAT_PROMOTION_VERIFIED`; UAT Smoke requires `UAT_READY`; the record requires
+   `UAT_SMOKE_PASSED`; Validation Complete requires every flag of the plan.
+3. No retries (`CUCUMBER_RETRY=0`), one worker, no ignored exit codes around suites, every suite run
+   compared with its approved size.
+
+## Gate drills (proving the gates in Jenkins)
+
+`GATE_DRILL` (MAIN builds only, default `none`) points one suite at a port of its container on which
+nothing listens; every scenario then fails for real, without changing any test or environment:
+
+- `fail-qa-regression`: QA Regression fails → FAILURE, **nothing deployed to UAT**;
+- `fail-uat-smoke`: UAT Smoke fails → FAILURE, no deployment record.
+
+Run a normal `main` build afterwards so that QA and UAT end validated.
+
+## Configuration
+
+| Item                         | Where                   | Default | Meaning                                      |
+| ---------------------------- | ----------------------- | ------- | -------------------------------------------- |
+| `PARABANK_MAIN_BRANCH`       | Jenkins global property | `main`  | Branch whose builds are the CD pipeline      |
+| `PARABANK_LOCK_WAIT_MINUTES` | Jenkins global property | `180`   | Maximum wait for the pipeline lock           |
+| `RUN_KNOWN_DEFECTS`          | Build parameter (MAIN)  | `false` | Run the known defects on UAT after UAT Smoke |
+| `ADDITIONAL_QA_SUITE`        | Build parameter         | `none`  | `sanity` or `full` on QA after the QA gate   |
+| `GATE_DRILL`                 | Build parameter (MAIN)  | `none`  | `fail-qa-regression` or `fail-uat-smoke`     |
+
+The former `PARABANK_UAT_APPROVERS` and `PARABANK_UAT_APPROVAL_MINUTES` global properties are no
+longer read (the manual approval was removed); they can be deleted from Jenkins once this version
+is on `main`.
 
 ## Roles: push validation by branch prefix
 
@@ -102,6 +282,11 @@ PR checkouts fetch only the PR ref, so the script fetches the target branch anon
 | documentation (`docs/**`, `*.md`), `.gitignore`, `.env.example` (never loaded in CI)                                                                                                                                                                                           | nothing beyond Smoke            |
 | anything the map does not know (e.g. a new page object)                                                                                                                                                                                                                        | **Regression (24)** (fail-safe) |
 
+**On pull requests the full Regression never runs:** a Regression-level selection (shared code,
+high-risk or gate-defining files) is recorded in `selection.json` and deferred to the post-merge QA
+Regression, which runs exactly once per promotion as the gate before UAT; feature-level selections
+still run on the PR. `qa/*` pushes run the selection in full.
+
 Known-defect scenarios are never selected (the `full` profile excludes them); a selection that
 contains only known defects runs nothing and does not gate. After the run, the coverage validator
 checks that exactly the selected scenarios ran, once each, and passed (`--paths` for a feature
@@ -115,180 +300,7 @@ new rule, and until then its files select Regression. Renames list both the old 
 image, lint/format configs, the ruleset file) are reported in the console and in `selection.json`
 as `GATE-DEFINING CHANGE`. Jenkins validates a PR with **the PR's own Jenkinsfile and scripts**, so
 such a PR can weaken the checks that judge it; it is merged manually after review, never
-auto-merged (see the auto-merge policy).
-
-## Repository, branches and merge protection
-
-- **Repository:** https://github.com/vassilva/Automacao-ParaBank-Playwright (public; `main` is the
-  default branch). Work happens on `feature/*` branches and reaches `main` only through a PR.
-- **Required check:** the GitHub check run **`Jenkins`**, published by the GitHub App
-  `jenkins-qa-automation` (app ID **4991392**) for every Jenkins build. For a PR build it carries the
-  result of the whole PR pipeline: Quality Gates, Config Check, QA Smoke, QA Impacted Tests, their
-  count checks, and the final **Validation Complete** stage, which fails the build unless every
-  validation of the plan actually ran and passed (a skipped stage never counts as a pass). Observed
-  on PR #1, together with `Tests / Build, Deploy and Validate` (named after a stage, so it changes
-  when stages are renamed; not required) and the commit status
-  `continuous-integration/jenkins/pr-head` (named after the PR discovery strategy). Both `Jenkins`
-  and the status are posted by app 4991392 (`jenkins-qa-automation[bot]`).
-- **Why two required signals.** Read from the installed plugins (checks-api 402,
-  github-branch-source 1967):
-
-  | Jenkins result | `Jenkins` check run                | `pr-head` commit status | GitHub treats it as |
-  | -------------- | ---------------------------------- | ----------------------- | ------------------- |
-  | SUCCESS        | success                            | success                 | pass                |
-  | UNSTABLE       | neutral (if configured) or failure | failure                 | **neutral = pass**  |
-  | FAILURE        | failure                            | error                   | fail                |
-  | NOT_BUILT      | **skipped**                        | error                   | **skipped = pass**  |
-  | ABORTED        | cancelled                          | error                   | fail                |
-  | running        | in progress                        | pending                 | blocks              |
-
-  GitHub counts a skipped or neutral required **check** as passing; a commit **status** passes only
-  when `success`. The pipeline therefore never ends a PR build NOT_BUILT or UNSTABLE (no milestones
-  on PR/branch builds, and `post` turns UNSTABLE into FAILURE), and the ruleset requires
-  **both** the `Jenkins` check and the `continuous-integration/jenkins/pr-head` status from app
-  4991392, so that even a regression of the pipeline cannot turn a non-validated build into a merge.
-  Caveat: the status name follows Jenkins' PR discovery strategy; switching to "merge" would rename
-  it to `pr-merge` and block every PR until the ruleset is updated (fail-safe).
-
-- **Protection (to be applied, see the authorization runbook):** the repository ruleset
-  [`github-ruleset-main.json`](github-ruleset-main.json) on the default branch requires a pull
-  request, requires the `Jenkins` check and the `pr-head` status from app 4991392 to pass on a
-  branch that is up to date with `main` (a failing, pending or missing check blocks the merge),
-  blocks direct pushes, force-pushes and deletion, and has **no bypass actors**. It requires no
-  review approval, because a single maintainer cannot approve their own PR. Rulesets and branch
-  protection are available on public repositories on every GitHub plan. The repository owner can
-  still edit or disable the ruleset; that is an administrative action outside any PR.
-- **Up to date, not a merge queue:** merge queues are available only for organization-owned
-  repositories; this repository belongs to a user account. "Require branches to be up to date"
-  (`strict_required_status_checks_policy: true`) gives the same guarantee for one PR at a time: the
-  `Jenkins` check must have passed on the PR head **including the current `main`**. When `main`
-  moves, the PR is out of date and cannot merge (auto-merge waits) until it is updated (the "Update
-  branch" button, enabled by `allow_update_branch`) and Jenkins has passed again on the new head.
-  Jenkins builds PRs at their head revision, so the validated revision is exactly what merges.
-- **Auto-merge policy (enabled per PR, never by default):** the repository setting
-  `allow_auto_merge` only makes the option available; nothing enables it automatically. It is
-  enabled intentionally, per eligible PR, by its author or a maintainer:
-  `gh pr merge <n> --auto --merge` (or "Enable auto-merge" on the PR). A PR is eligible when it is
-  ready for review (not a draft), targets `main`, comes from this repository, its author wants it in
-  `main` as soon as it is validated, and it changes **no gate-defining file**
-  (`.github/gate-defining-paths.json`: the Jenkinsfile, `scripts/ci/**`, the test-data audit, log
-  and report redaction, runner configuration and dependencies, the Playwright adapter, the CI agent
-  image, lint/format configs, `.github/**`, the ruleset file). Such a PR is judged by the very
-  checks it modifies, so it is reviewed and merged manually.
-  **Enforcement (preventive):** the console line `GATE-DEFINING CHANGE` alone prevents nothing.
-  `.github/workflows/gate-guard.yml` is a `pull_request_target` workflow, which GitHub always runs
-  from `main` (a PR cannot change the guard or its list until it is merged); it never checks out
-  or runs PR code. On every PR event it reads the PR's changed paths (old and new paths of renames)
-  and sets the commit status **`gate-review`** on the PR head: _success_ when no gate-defining
-  file changed, or when a human added the label **`gate-change-reviewed`**; _failure_ otherwise.
-  Every new commit removes the label, and a commit has no status until the guard ran. With
-  `gate-review` required by the ruleset (added once the guard is on `main`), GitHub refuses
-  **any** merge, automatic or manual, of an unreviewed gate-defining PR; there is no race with
-  auto-merge. While such a PR is unreviewed the guard also turns auto-merge off and comments.
-  Residual limits: a reviewed gate-defining PR can still be auto-merged if someone enables it
-  after reviewing (a deliberate human decision); anyone with write access can add the label, or
-  write a workflow that posts a `gate-review` status (rulesets pin a status to an app, and every
-  workflow uses the same `github-actions` app), so this protects against unattended merges, not
-  against a malicious maintainer. Merge queues and push rulesets (file-path restrictions) are
-  not available for this user-owned public repository, and code-owner review would block the
-  only maintainer.
-  GitHub then merges an
-  eligible PR only when every ruleset rule is satisfied: the `Jenkins` check and the `pr-head`
-  status passed on an up-to-date head. A missing, pending, failing, cancelled or errored signal
-  blocks the merge; a new push re-runs the check and the merge waits for it. GitHub
-  disables auto-merge itself if someone without write access pushes to the PR branch or the base
-  branch is changed. `gh pr merge <n> --disable-auto` cancels it.
-- **Jenkins job:** Multibranch Pipeline `Automacao-ParaBank-Playwright` (GitHub Branch Source,
-  credential `github-app-qa-automation`), created in the Jenkins UI as a copy of the ServeRest job.
-  Discovery: branches excluding those filed as PRs; PRs from the repository itself at the PR head
-  revision. The local Jenkins is not reachable from GitHub, so it relies on periodic scans; **the
-  job currently has no periodic scan trigger** (see the authorization runbook).
-
-| Event                                | Jenkins build           | What runs                                                                                               | UAT?           |
-| ------------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------- | -------------- |
-| Push to a branch without a PR        | branch job (PUSH)       | by prefix: `feature/*` Smoke, `qa/*` Impacted Tests, `config/*` Config Check (see Roles)                | no             |
-| PR opened / updated (from this repo) | `PR-<n>` (PULL REQUEST) | quality gates, build image, deploy QA, **QA Smoke (4)**, **QA Impacted Tests**; = the `Jenkins` check   | no             |
-| Merge into `main` (auto or manual)   | `main` (MAIN)           | quality gates, build image, deploy QA, **QA Regression (24)**, **approval**, promote, **UAT Smoke (4)** | after approval |
-
-## Stages, in execution order
-
-| #   | Stage                                 | PR / PUSH | MAIN | What it does                                                                                                                                                                                                                                                                                                       |
-| --- | ------------------------------------- | :-------: | :--: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | Build Context                         |     ✓     |  ✓   | Build mode (`CHANGE_ID` → PR; `PARABANK_MAIN_BRANCH`, default `main` → MAIN; otherwise PUSH), push role by prefix, build image tag                                                                                                                                                                                 |
-| 2   | **Build and QA** (agent, host lock)   |     ✓     |  ✓   | Workspace Guard (1 worker, 0 retries, no `.env`; PR/branch: superseded → ABORTED) → Install → Quality Gates → [Config Check: PR and `config/*`; `config/*` stops here] → Acquire Host Lock (then superseded → ABORTED) → Build Image (once) → Deploy QA → QA Ready (healthy, database initialized, exact image ID) |
-| 2a  | ↳ QA Smoke                            |  PR, dev  |  –   | CI gate: `test:smoke`, then 4/4 executed once and passed                                                                                                                                                                                                                                                           |
-| 2b  | ↳ QA Impacted Tests                   |  PR, qa   |  –   | `ci:impacted run`: the change's selection (see above), then exactly the selected scenarios executed once and passed                                                                                                                                                                                                |
-| 2c  | ↳ QA Gate                             |     ✓     |  –   | Fails unless every suite the role requires ran and passed; then sets `QA_GATE_PASSED` (not for `config/*`)                                                                                                                                                                                                         |
-| 2d  | ↳ QA Regression                       |     –     |  ✓   | **Deployment gate**: `test:regression`, then 24/24 executed once and passed                                                                                                                                                                                                                                        |
-| 2e  | ↳ QA Additional Suite                 |    opt    | opt  | Parameter `ADDITIONAL_QA_SUITE` = `sanity` (10) or `full` (52), after the QA gate passed                                                                                                                                                                                                                           |
-| 2f  | **Validation Complete** (no agent)    |     ✓     |  –   | Fails unless every flag of the plan is set (PR: Config Check, Smoke, Impacted Tests, QA Gate); a skipped stage never counts as a pass                                                                                                                                                                              |
-| 3   | **UAT Approval** (no agent, no lock)  |     –     |  ✓   | Only if QA Regression passed. Milestone (supersedes older waiting builds), mandatory `input` restricted to `PARABANK_UAT_APPROVERS`, timeout `PARABANK_UAT_APPROVAL_MINUTES` (default 60), approver re-checked, milestone "UAT approved"                                                                           |
-| 4   | **UAT Deployment** (agent, host lock) |     –     |  ✓   | Only after an authorized approval: Workspace Guard → Install → Host Lock → Verify Approved Image (commit still main's head, same image ID) → Promote to UAT (same image ID, no rebuild) → UAT Ready (healthy, database initialized, identity = approved)                                                           |
-| 4a  | ↳ UAT Smoke                           |     –     |  ✓   | Post-deployment verification: `test:smoke`, then 4/4                                                                                                                                                                                                                                                               |
-| 4b  | ↳ Known Defects                       |     –     | opt  | Parameter `RUN_KNOWN_DEFECTS`, after UAT Smoke passed: 25 known-defect scenarios; at most UNSTABLE                                                                                                                                                                                                                 |
-| 4c  | ↳ Deployment Record                   |     –     |  ✓   | `deployment/deployment-record.txt`: source commit, built/QA/UAT image IDs, approver, validation counts                                                                                                                                                                                                             |
-
-The approval runs between two agent stages on purpose: while it waits, the pipeline holds **no
-executor, workspace or host lock**, so other pipelines (PR builds, other jobs) keep running. The
-host lock is released after QA and acquired again for UAT; the approved image is checked again
-before promotion (same ID as the one QA Regression validated, still present, built from the pinned
-commit). The build's image tag is kept only while an approval is pending; a reject, timeout or abort
-removes it (pipeline `post`), so a rejected image can never be promoted later by mistake.
-
-## Approval: who can approve
-
-- `PARABANK_UAT_APPROVERS` (Jenkins global property, **required**): comma-separated Jenkins user
-  IDs. If it is unset or empty, the approval stage fails and nothing is deployed.
-- The `input` is restricted to those users (`submitter`), and the pipeline **checks the approver
-  again** after the input returns (`submitterParameter`), failing without deploying if the approver
-  is not in the list.
-- Why both: this Jenkins uses "Logged-in users can do anything", so every account (`admin`,
-  `noreply`, `viamerico`) is a Jenkins administrator, and Jenkins lets administrators answer any
-  input regardless of `submitter`. The pipeline-side check still refuses to deploy for anyone not in
-  `PARABANK_UAT_APPROVERS`. To stop other accounts from even clicking, restrict Jenkins
-  authorization (Matrix-based security) or disable the unused accounts: a Jenkins setting outside
-  this repository. The approver for this installation is `viamerico` (your account, matched by its
-  e-mail address; not yet configured).
-- Verified on the isolated Jenkins: an identity outside the allow-list could answer the input, and
-  the pipeline then failed with "not an authorized UAT approver … Nothing is deployed to UAT"; an
-  allow-listed identity succeeded; `input` returns the approver ID as a String.
-- Reject, timeout (default 60 minutes) or abort end the build ABORTED with no UAT stage executed
-  (reject and timeout verified on the isolated Jenkins). Supersession by a newer `main` build ends
-  it NOT_BUILT, also before any UAT stage.
-
-## Gates
-
-1. Stages run in sequence: a failing suite (or its count check) fails its stage, the build is FAILED,
-   and every later stage is skipped.
-2. Each later step also requires the previous gate's own flag, set only as the last statement of
-   that stage: the approval requires `QA_REGRESSION_PASSED`; the UAT deployment requires
-   `UAT_APPROVED` (set only after the approver check); UAT Smoke requires `UAT_READY`; the
-   deployment record and known defects require `UAT_SMOKE_PASSED`.
-3. No retries (`CUCUMBER_RETRY=0`, checked by both Workspace Guards), no ignored exit codes around
-   suites, and every suite run is compared with its approved size.
-
-Checked locally (not a Jenkins run): the Jenkinsfile parses with the Groovy runtime bundled in the
-lab Jenkins (a deliberately broken copy does not), and a simulation that evaluates the Jenkinsfile's
-own `when` expressions gives: PR → QA Smoke → QA Impacted Tests → QA Gate; `feature/*` and other
-pushes → QA Smoke → QA Gate; `qa/*` → QA Impacted Tests → QA Gate; `config/*` → Quality Gates →
-Config Check, with no lock, image, deployment or QA teardown; MAIN → QA Regression → approval →
-verify → promote → UAT Ready → UAT Smoke → deployment record; failed QA Regression → FAILURE, no
-approval; reject or timeout → ABORTED before any UAT stage; unauthorized or unconfigured approver →
-FAILURE before any UAT stage; failed verification, UAT readiness or UAT Smoke → FAILURE, no
-deployment record.
-
-## Gate drills (proving the gates in Jenkins)
-
-`GATE_DRILL` (MAIN builds only, default `none`) points one suite at a port of its container on
-which nothing listens. Every scenario then fails for real, at transport level, without changing
-any test or either environment:
-
-- `fail-qa-regression`: QA Regression fails → FAILURE, **no approval requested, nothing deployed to
-  UAT**.
-- `fail-uat-smoke` (approve when asked): UAT Smoke fails → FAILURE, no deployment record.
-
-The approval gate itself is proven by rejecting (or letting time out) one normal MAIN build:
-ABORTED, UAT untouched. Run a normal build afterwards to leave QA and UAT validated again.
+auto-merged (see Merge policy).
 
 ## Suite counts and the coverage validator
 
@@ -304,30 +316,53 @@ works on Windows as well as Linux.
 
 ## Environments
 
-|                 | QA                                                        | UAT                                                     |
-| --------------- | --------------------------------------------------------- | ------------------------------------------------------- |
-| Compose project | `parabank-qa`                                             | `parabank-uat`                                          |
-| Local URL       | `http://localhost:8090/parabank/`                         | `http://localhost:8091/parabank/`                       |
-| From the agent  | `http://parabank-qa-parabank-1:8080/parabank/`            | `http://parabank-uat-parabank-1:8080/parabank/`         |
-| Database        | own container, fresh per deploy                           | own container, fresh per deploy                         |
-| Deployed by     | every build except `config/*` pushes                      | MAIN builds that passed QA Regression and were approved |
-| Tested with     | Smoke and/or Impacted Tests (PR, push), Regression (main) | Smoke                                                   |
-| After the build | left running                                              | left running                                            |
+|                 | QA                                                        | UAT                                                |
+| --------------- | --------------------------------------------------------- | -------------------------------------------------- |
+| Compose project | `parabank-qa`                                             | `parabank-uat`                                     |
+| Local URL       | `http://localhost:8090/parabank/`                         | `http://localhost:8091/parabank/`                  |
+| From the agent  | `http://parabank-qa-parabank-1:8080/parabank/`            | `http://parabank-uat-parabank-1:8080/parabank/`    |
+| Database        | own container, fresh per deploy                           | own container, fresh per deploy                    |
+| Deployed by     | builds whose app image is new to QA (DEPLOY/BUILD)        | MAIN builds whose QA Regression passed (automatic) |
+| Tested with     | Smoke and/or Impacted Tests (PR, push), Regression (main) | Smoke                                              |
+| After the build | left running                                              | left running                                       |
 
-QA is shared: after a PR build it runs that PR's candidate image, while UAT keeps the last image
-promoted from `main`. Both are defined once in `src/support/environments.ts` and managed by
+QA is shared, one pipeline at a time: it runs the current application image and changes only
+when a PR or `main` build brings different application inputs; UAT runs the last image a `main`
+build validated and promoted. Both are defined once in `src/support/environments.ts` and managed by
 `scripts/environment.ts` (`npm run qa:deploy|start|stop|status|health`, the same for `uat:`, and
 `npm run env:identity`). The same tests target either one by configuration only (`TARGET_ENV`);
 Jenkins also sets `PARABANK_BASE_URL` to the container address.
 
+## Application image: reuse, deploy or build (explicit, deterministic)
+
+This repository is mostly test automation. The ParaBank image is a function of its **build inputs**
+only: `docker/parabank/**` (Dockerfile, pinned source commit) and `scripts/build-parabank-image.ts`.
+Their SHA-256 is the **inputs digest**, recorded on every image built by this project (label
+`parabank.inputs.digest`). Under the host lock, "Resolve Application Image"
+(`scripts/ci/app-image.ts`) decides:
+
+| Action | When                                                                       | Effect                                                                  |
+| ------ | -------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| REUSE  | QA runs, is healthy, and its image has this digest and the pinned revision | no build, no deployment; QA is re-verified (health, database, identity) |
+| DEPLOY | an image with this digest exists, but QA runs another one or is unhealthy  | deploy it to QA, no build                                               |
+| BUILD  | no image with this digest exists (e.g. the application version changed)    | build once, deploy                                                      |
+
+Images without the label (built before it existed) are never reused. Whatever the action, "Verify
+Application Image" checks the pinned revision and the digest, QA Ready checks that QA runs exactly
+that image ID, and on `main` that same ID is the only one QA Regression validates and the automatic
+UAT promotion can deploy (UAT Promotion checks ID, revision and digest again). A test-only or
+documentation change therefore never promotes a different or unvalidated application version.
+
 ## Build once, promote the same image
 
-- The image is built once per pipeline; its ID (`sha256:…`) is the identity. Tags are only pointers
-  for humans (`parabank-ci:<build>`, removed after the build; `parabank-qa:current` and
-  `parabank-uat:current`).
+- An application image is built at most once (BUILD), only when no image from the current
+  application inputs exists; otherwise the existing one is reused. Its ID (`sha256:…`) is the
+  identity. Tags are only pointers for humans (`parabank-ci:<build>`, removed after the build;
+  `parabank-qa:current` and `parabank-uat:current`).
 - `compose.yaml` has **no default image**: QA and UAT can only be started with an explicit image ID.
-- Promotion deploys the image ID QA runs, after checking it equals the built ID; UAT Ready then
-  reads the image ID of both running containers from Docker and fails unless built = QA = UAT.
+- UAT receives only the image ID that QA Ready verified and QA Regression validated in the same
+  build (checked again before promotion: ID, revision, inputs digest); UAT Ready reads the running
+  container's image ID from Docker and fails unless it equals the validated one.
 
 ## Known defects in CI
 
@@ -380,261 +415,76 @@ JavaScript, `…number:!0,password:!0`, not data.)
    history exists before anything is removed.
 2. Check the new builds' archives and console logs with the counts above (expected: all zero).
 3. Delete the two affected builds in the Jenkins UI: _Automacao-ParaBank-Playwright → main → #1 →
-   Delete build_, and _→ Pull Requests → PR-1 → #1 → Delete build_ (PR-1's whole branch job also
-   disappears once Jenkins prunes the merged PR). Deleting the build removes its console log and
+   Delete build_. (`PR-1` #1 no longer exists: Jenkins pruned the merged PR's job,
+   with its builds, on 2026-10-10.) Deleting the build removes its console log and
    archive together; Jenkins has no UI to delete only one archived file, and editing files in the
    Jenkins home is not recommended.
 4. Nothing else needs cleaning: the values are synthetic customers of throwaway environments and
    the vendor's public demo customer; no real credentials were involved.
 
-## Concurrency
+## Operations: what remains manual
 
-QA and UAT are shared by every job of the host, so the build, deploy and test part of a pipeline
-holds a **host-wide lock** (`scripts/ci/host-lock.ts`): an atomic Docker network labelled with the
-owner (`BUILD_TAG`); waiters poll for at most 60 min (`PARABANK_LOCK_WAIT_MINUTES`); a lock older
-than 150 min (`PARABANK_LOCK_STALE_MINUTES`) is removed loudly; it is released in `post`, also on
-failure or abort, and only by its owner. Cucumber always runs with one worker and no retries
-(checked by the Workspace Guard). The atomicity was checked on the lab daemon (Docker 29.7.2):
-5 rounds of 12 simultaneous `docker network create` of one name produced exactly one network each.
-
-What the lock covers, per build: Build Image → Deploy QA → QA Ready → suites → QA teardown (PR,
-`feature/*`, `qa/*`, `main`), and separately UAT promotion → UAT Smoke (`main`, after approval).
-`config/*` pushes take no lock. The approval wait holds no lock, executor or workspace.
-
-**Superseding.** `disableConcurrentBuilds()` is gone: it would make a newer `main` build wait behind
-an older one sitting at the approval.
-
-- **PR and branch builds use no milestone.** A build cancelled by a milestone ends NOT_BUILT, which
-  the checks plugin publishes as a _skipped_ `Jenkins` check, and GitHub counts skipped required
-  checks as passing (see "Why two required signals"). Instead, the build compares its commit with
-  the PR/branch head (`git ls-remote`, URL never traced) in the Workspace Guard and again right
-  after acquiring the lock (the long wait), and ends **ABORTED** ("SUPERSEDED", check
-  _cancelled_, status _error_) if a newer commit exists. If the head cannot be read it continues:
-  finishing a build is always safe. Two builds of the same commit both run to their own result.
-- **`main` uses milestones** (decoded from the installed plugin 138.v78ca_76831a_43: passing ordinal
-  _N_ aborts every older running build of the job whose last milestone is lower, and aborts the
-  build itself if a newer one already passed _N_ or more). `main` builds run up to QA Regression in
-  order (host lock). At the approval each passes ordinal = build number, which aborts any **older
-  build still waiting for approval**, and aborts this build if a **newer** one already asked. After
-  the approval each passes ordinal 1 000 000 000: a build already approved and deploying is never
-  aborted by a newer one, and an older build approved after a newer one was approved is aborted.
-  A `main` build cancelled by the milestone ends **NOT_BUILT without running any `post` section**
-  (verified on an isolated Jenkins with the same plugins): its check on that `main` commit shows
-  "skipped" (`main`'s checks gate nothing) and its build tag `parabank-ci:main-<n>-*` is left
-  behind. That image can never be promoted (promotion uses the build's own image ID after its own
-  approval); see "Recovery" for the tag cleanup.
-- Verify Approved Image reads `main`'s head: if `main` moved on since this build's commit, the build
-  ends ABORTED "SUPERSEDED" before anything is deployed. Only the latest validated image can reach
-  UAT.
-
-**Shared QA risks and how they are handled:**
-
-| Risk                                                             | Handling                                                                                                                                          |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Two builds deploy or test QA at the same time                    | Host lock around build, deploy and test; one Cucumber worker                                                                                      |
-| A PR build replaces the image QA Regression is testing           | Impossible while the lock is held; QA Regression runs inside the lock                                                                             |
-| QA runs a PR candidate after the main build moved on to approval | Expected: approval and UAT use the image **ID**, not QA's current state; Verify Approved Image checks the image still exists and its revision     |
-| Several PRs auto-merge in a row                                  | Each merge starts a `main` build; they validate in order; the newest reaching approval supersedes older waiting ones; the head check blocks older |
-| A PR validated against an old `main`                             | Required check is strict (up to date): out-of-date PRs cannot merge until updated and re-validated                                                |
-| A superseded PR build reports a passing check                    | No milestones on PR builds (head check → ABORTED); UNSTABLE → FAILURE; the ruleset also requires the `pr-head` status (success only)              |
-| PR checks wait while another build holds QA                      | Bounded lock wait (60 min) and stage timeouts; superseded builds stop after the wait; the approval holds no lock                                  |
-
-**Expected bottleneck.** Everything that deploys is serialized by the lock. Measured in the two
-real builds, the ParaBank image build alone took 280 s and 315 s (it compiles the pinned source and
-runs ParaBank's own 239 tests, `PARABANK_BUILD_FRESH=true`); locally, Regression (24) ran in 27 s
-and one feature in 8 s; deploy + readiness are estimated at 1–2 minutes (not measured separately).
-A PR or `main` build therefore holds the lock for an **estimated 7–10 minutes**, most of it in the
-image build (whole builds: `main` #1 11.6 min, `PR-1` #1 19.9 min, earlier pipeline designs). Builds queue one after
-another: about 6 builds waiting at once reach the 60-minute lock wait and fail (a failed check
-blocks the merge: safe, but noisy). Auto-merge adds one `main` build per merged PR, and the strict
-up-to-date rule makes every other open PR re-validate after each merge, so N open PRs cost roughly
-N² / 2 builds when merged one by one.
-
-**Not changed, on purpose:** the image build stays inside the lock. It does not touch QA, but the
-lock was introduced because two pipelines building and testing ParaBank at once exhausted the lab's
-Docker VM (3.7 GiB) and every Smoke step timed out (`scripts/ci/host-lock.ts`). Moving it out would
-reintroduce that failure on this host.
-
-**Future scaling (not implemented):**
-
-1. Reuse the application image across PRs: the application is the pinned upstream commit, so a PR
-   that does not touch `docker/parabank/**` could deploy an image already built from the same
-   inputs (content-addressed tag, verified by revision label and image ID), cutting ~5 min from the
-   lock. `main` keeps building fresh for provenance. Needs a decision on the "build once per
-   pipeline" rule.
-2. A larger Docker VM, then a separate build lock (CPU/memory) and QA lock (environment).
-3. Ephemeral per-PR environments (one Compose project per PR on its own port) with a capacity
-   limit; QA stays the shared integration environment for `main`.
-4. A merge queue (if the repository moves to an organization) instead of strict up-to-date, so
-   queued PRs are validated together once instead of re-validated after every merge.
-
-## Configuration
-
-| Item                            | Where                   | Default | Meaning                                                                    |
-| ------------------------------- | ----------------------- | ------- | -------------------------------------------------------------------------- |
-| `PARABANK_UAT_APPROVERS`        | Jenkins global property | (none)  | **Required for MAIN**: Jenkins user IDs allowed to approve UAT deployments |
-| `PARABANK_UAT_APPROVAL_MINUTES` | Jenkins global property | `60`    | Approval timeout; expiry → ABORTED, nothing deployed                       |
-| `PARABANK_MAIN_BRANCH`          | Jenkins global property | `main`  | Branch whose builds are the CD pipeline                                    |
-| `RUN_KNOWN_DEFECTS`             | Build parameter (MAIN)  | `false` | Run the known defects on UAT after UAT Smoke                               |
-| `ADDITIONAL_QA_SUITE`           | Build parameter         | `none`  | `sanity` or `full` on QA after the QA gate                                 |
-| `GATE_DRILL`                    | Build parameter (MAIN)  | `none`  | `fail-qa-regression` or `fail-uat-smoke` (see drills)                      |
-
-Agent requirements: a Docker-capable Jenkins with the Docker Pipeline, Pipeline: Input Step and
-Pipeline: Milestone Step plugins, git in the agent image (the Playwright base image has it), access
-to the host Docker socket, a `built-in` node with executors (removing a build's
-image tag after a rejected approval), and host ports 8090 and 8091 free for QA and UAT.
-
-## First real integration: authorization runbook
-
-Nothing below has been done. Each step is a separate authorization, in this order
-(`R` = `vassilva/Automacao-ParaBank-Playwright`).
-
-1. **Apply the ruleset** — `gh api -X POST repos/R/rulesets --input docs/github-ruleset-main.json`.
-   - _Changes:_ `main` requires a PR and the `Jenkins` check + `pr-head` status (app 4991392) on an
-     up-to-date head; no direct or force pushes, no deletion, no bypass actors.
-   - _Risk:_ a required signal never arrives (e.g. the status is not attributed to the app) and every
-     PR is blocked; direct pushes to `main` stop working (intended).
-   - _Verify:_ `gh api repos/R/rules/branches/main`; on the first PR both signals show as required and
-     the merge is blocked while they are pending.
-   - _Revert:_ `gh api -X DELETE repos/R/rulesets/<id>` (or set enforcement to "disabled").
-2. **Jenkins global property** `PARABANK_UAT_APPROVERS=viamerico` (optionally
-   `PARABANK_UAT_APPROVAL_MINUTES`) — Manage Jenkins → System → Global properties.
-   - _Why:_ without it the `main` pipeline stops at the approval. `viamerico` is your account
-     (matched by its e-mail address, read-only).
-   - _Risk:_ global properties are visible to every job (the other jobs do not read this one).
-   - _Verify:_ the "UAT APPROVAL REQUIRED" banner lists `viamerico`. _Revert:_ remove the property.
-3. **Push the branch and open the PR at once** — `git push -u origin feature/ci-pr-smoke-main-regression`,
-   `gh pr create --base main`.
-   - _Changes:_ publishes the commits (public repository; the diff was scanned: no secrets).
-   - _Risk:_ a scan between push and PR also builds the branch job (Developer plan; harmless, uses QA).
-   - _Verify:_ PR page; `git status -sb` shows the branch in sync. _Revert:_ close the PR, delete the
-     remote branch.
-4. **PR discovery** — the job's "Scan Multibranch Pipeline Now", then the trigger "Periodically if
-   not otherwise run" every 2 minutes (the local Jenkins is not reachable from GitHub: no webhook).
-   - _Risk:_ every pushed branch or PR gets built (QA use, serialized by the lock); the scans use a
-     small part of the App's API quota.
-   - _Verify:_ the scan log lists `PR-<n>` and its build starts. _Revert:_ untick the trigger.
-5. **Inspect the PR build** (read-only): Quality Gates (incl. BDD structure), Config Check, QA Smoke
-   4/4, QA Impacted Tests = Regression 24/24 (this PR is gate-defining), QA Gate, Validation Complete.
-   GitHub must show `Jenkins` = success and `pr-head` = success from `jenkins-qa-automation[bot]`.
-6. **Pending blocks the merge** (read-only, during step 5): `gh pr view <n> --json mergeStateStatus`
-   is `BLOCKED` while the build runs, `CLEAN` after it passed.
-7. **Superseding drill** — push one empty commit (`git commit --allow-empty`) while the PR build runs.
-   - _Proves:_ the older build ends ABORTED ("SUPERSEDED"; check "cancelled", status "error"), never
-     "skipped"; the new build validates the new head. _Cost:_ one extra build.
-8. **Manual merge of this PR** (gate-defining, never auto-merged) — `gh pr merge <n> --merge` once
-   everything is green.
-   - _Changes:_ starts the `main` pipeline and puts the gate guard on `main`.
-   - _Revert:_ a revert PR (`git revert -m 1 <merge sha>`) through the normal flow.
-9. **`main` pipeline** (automatic after the scan): Quality Gates → build once → deploy QA → QA
-   Regression 24/24 → approval request. A failure ends FAILURE with nothing deployed to UAT.
-10. **Approve in Jenkins as `viamerico`** — same image ID promoted to UAT, UAT Smoke 4/4, deployment
-    record ("Approved by: viamerico", built = QA = UAT image ID). On failure see Recovery.
-11. **Gate drills**, one authorized build each ("Build with Parameters" on `main`):
-    `fail-qa-regression` (FAILURE, no approval); a normal build whose approval is rejected (ABORTED);
-    `fail-uat-smoke`, approved (FAILURE); then one normal build (SUCCESS, UAT fully validated again).
-12. **Enable auto-merge availability** —
-    `gh api -X PATCH repos/R -F allow_auto_merge=true -F allow_update_branch=true`.
-    - _Changes:_ auto-merge becomes **available**; it stays off on every PR until someone enables it
-      on that PR. "Update branch" lets out-of-date PRs catch up with `main`.
-    - _Revert:_ the same call with `=false`.
-13. **Auto-merge trials** — a documentation-only PR with auto-merge enabled (must merge only after
-    the checks pass); a gate-defining PR with auto-merge enabled (the guard must turn it off and
-    comment). If the workflow token cannot disable auto-merge, keep `allow_auto_merge` off.
-14. **Delete the two old builds** with unredacted synthetic data (`main` #1, `PR-1` #1; inventory
-    above), only after new builds are green and their archives were checked clean. Irreversible.
-
-Optional hardening (separate decision): Jenkins Matrix-based security (or disabling the unused
-`admin` and `noreply` accounts) so that only `viamerico` can answer the approval at all. Today every
-logged-in account is an administrator, and the pipeline's own allow-list check is what refuses
-anyone else (verified on the isolated Jenkins).
+1. **Merging:** the repository owner merges each PR in GitHub once its required checks passed (and,
+   for gate-defining changes, after reviewing it and adding the label `gate-change-reviewed`).
+2. **After this version is on `main`:** delete the obsolete Jenkins global properties
+   `PARABANK_UAT_APPROVERS` and `PARABANK_UAT_APPROVAL_MINUTES` (Manage Jenkins → System → Global
+   properties); nothing reads them any more.
+3. **Optional:** install the Lockable Resources plugin if waiting builds should not occupy an
+   executor; enable "Automatically delete head branches" to avoid one branch build after each
+   merge; delete the stale `feature/ci-jenkins-pipeline` branch; delete `main` #1 (unredacted
+   synthetic data, see "Artifacts archived before the log-redaction fix").
 
 ## Failure, rollback and recovery
 
-Observed on the real Jenkins (2026-10-10), and what to do about it:
-
-- **Enabling the scan trigger builds every branch it has not built yet**, with that branch's own
-  Jenkinsfile. The first scan started `main` #2 on the old merge commit (whose old pipeline
-  promoted to UAT without approval) and the stale `feature/ci-jenkins-pipeline`. They were held at
-  the host lock (a manual lock owner) and aborted before building anything. Before enabling
-  scanning on a job, check which heads it has never built.
-- **A hard-killed build can keep its executor.** After a forced abort ("Hard kill!") the agent
-  container stayed up and one built-in executor stayed busy, so the next build waited with
-  "Still waiting to schedule task" (the `windows-agent` line in that message only means that node
-  is reserved for `windows` jobs). Prefer a normal abort; after a hard kill, restart Jenkins once
-  it is idle.
-- **Merged PRs:** the job discards removed branches, so the `PR-<n>` job and its builds disappear
-  after the merge (GitHub keeps the checks). The merged branch itself is then built once as a
-  branch job (Developer plan, never UAT) unless it is deleted; enabling "Automatically delete head
-  branches" avoids that build.
-
-- **PR check fails:** the merge stays blocked. Read the console and JUnit, fix, push (the new build
-  supersedes the old one). No retries: a flaky failure is a defect to investigate, not to re-run
-  blindly.
-- **`main` QA Regression fails:** FAILURE, no approval, UAT untouched, but `main` holds a commit QA
+- **PR check fails:** the merge stays blocked. Read the console and JUnit, fix, push (the new commit
+  supersedes the old build). No retries: a flaky failure is a defect to investigate.
+- **`main` QA Regression fails:** FAILURE, nothing deployed to UAT, but `main` holds a commit QA
   rejected. Revert the merge through a PR (`git revert -m 1 <merge sha>`) or fix forward through a
   PR; the next `main` build re-validates.
-- **UAT readiness or UAT Smoke fails after promotion:** FAILURE, no deployment record, and UAT runs
+- **UAT readiness or UAT Smoke fails after a deployment:** FAILURE, no deployment record; UAT runs
   the new image. Roll UAT back to the last image whose UAT Smoke passed (authorized operation):
   `docker image inspect parabank-uat:current --format '{{.Id}}'`, then
-  `npm run -s env -- deploy uat <that ID>`, `npm run uat:health` and
-  `TARGET_ENV=uat npm run test:smoke`. Then fix forward through a PR.
-- **Approval rejected, timed out or superseded:** ABORTED (superseded: NOT_BUILT), UAT untouched.
-  A superseded build leaves its build tag (next item).
+  `npm run -s env -- deploy uat <that ID>`, `npm run uat:health`, `TARGET_ENV=uat npm run test:smoke`.
+  Then fix forward through a PR.
+- **A build waits for the lock:** its console names the holder. Normal: let the holder finish. A
+  waiter fails after 180 min; a lock older than 330 min (holder died) is removed by the next waiter.
+  Never remove an active lock by hand.
 - **Leftover build tags:** `docker image ls parabank-ci`; for a tag whose build has finished,
-  `docker image rm parabank-ci:<tag>` (never for a running build; an image QA or UAT runs stays).
-- **Host lock left behind** (Jenkins or agent crash): waiting builds name the owner; the lock is
-  removed automatically after 150 minutes, or, once no build is running,
-  `npm run -s ci:lock -- release <owner>`.
+  `docker image rm parabank-ci:<tag>` (an image QA or UAT runs stays).
 - **QA or UAT down** (e.g. after a reboot; Docker Desktop is started manually): `npm run qa:start` /
   `npm run uat:start` (same image ID, no rebuild), then `npm run qa:health` / `npm run uat:health`.
+- **A hard-killed build kept an executor** ("Still waiting to schedule task"): restart Jenkins once
+  it is idle; prefer a normal abort to "Hard kill".
 - **The ruleset blocks every PR** (a required signal never arrives): compare the PR's check runs and
-  statuses (name and app) with the ruleset; correct it (`gh api -X PUT repos/R/rulesets/<id>`) or set
-  its enforcement to "disabled" temporarily (authorized).
+  statuses (name and app) with the ruleset; correct it or set its enforcement to "disabled"
+  temporarily (authorized).
 
 ## Validation status
 
-Three kinds of evidence, never to be confused:
+**Real Jenkins and GitHub (2026-10-10), previous designs of this pipeline:**
 
-**1. Real Jenkins builds (your Jenkins, earlier pipeline designs):** `main` #1 SUCCESS (image
-`sha256:c0cfd5a7…` built once, QA Smoke 4/4, same image ID promoted to UAT, UAT Smoke 4/4, UAT
-Regression 24/24) and `PR-1` #1 SUCCESS (QA Smoke 4/4, QA Regression 24/24, no UAT), 2026-10-07.
-**Current design on the real Jenkins (2026-10-10):**
+| Evidence                                    | Result                                                                                                                                                                                                                                                              |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PR-2` #1 (gate-defining PR)                | SUCCESS: Quality Gates, Config Check, QA Smoke 4/4, Regression 24/24 (then still run on PRs), Validation Complete; checks from app 4991392; merge blocked while missing and pending, CLEAN only after success; 0 unredacted values in console and 13 archived files |
+| `main` #3, `main` #4                        | SUCCESS: image built once, QA Regression 24/24, (then manual) approval by `viamerico`, same image ID on UAT, UAT Smoke 4/4                                                                                                                                          |
+| `PR-3` #1 superseded by a new commit        | ABORTED after taking the lock; `Jenkins` check failure, `pr-head` error (non-passing)                                                                                                                                                                               |
+| `PR-4` #1 (deliberate formatting violation) | FAILURE in Quality Gates, nothing deployed, lock untouched; status rollup FAILURE; closed, never merged                                                                                                                                                             |
+| `gate-review`                               | success on ordinary PRs, failure on an unreviewed gate-defining PR, posted by GitHub Actions (app 15368)                                                                                                                                                            |
+| Repository settings and rulesets            | auto-merge disabled; ruleset `24842741` (checks) and `24856083` (restrict updates) active; owner bypass: `never` / `pull_requests_only`                                                                                                                             |
 
-| Build                                   | Commit                             | Result                                     | Evidence                                                                                                                                                                                                                                                                                                                                                                                 |
-| --------------------------------------- | ---------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PR-2` #1 (PULL REQUEST, gate-defining) | `8a69de4`                          | SUCCESS, 12.4 min                          | Quality Gates (BDD structure 77/25), Config Check, QA Smoke 4/4, impacted = Regression 24/24, QA Gate, Validation Complete; UAT stages skipped; `Jenkins` check and `pr-head` status success from app 4991392; merge blocked while missing and pending, CLEAN only after success; 0 unredacted values in console and 13 archived files                                                   |
-| `main` #3 (MAIN)                        | `913365d` (PR #2, merged manually) | SUCCESS, 28.2 min incl. the human approval | image `sha256:bb72363e…` built once from `13cc8d4…`; QA Regression 24/24; QA Smoke and PR-only stages skipped; lock released before the approval; approval requested for `viamerico` (1440 min) and answered by `viamerico`; Verify Approved Image; UAT runs the same image ID; UAT Smoke 4/4; deployment record "Identity: MATCH"; 0 unredacted values in console and 14 archived files |
+**This version (serialized pipeline, automatic UAT promotion, no approval) has not run on the real
+Jenkins yet.** Its first real runs are the PR that introduces it and the `main` build after the
+owner merges it.
 
-**2. Isolated throwaway Jenkins** (same image `jenkins-jenkins` 2.541.2 and a copy of the same
-plugin set, security off, `--network none`, deleted afterwards; 2026-10-10). Not your Jenkins and
-not the real pipeline, but real Jenkins semantics:
+**Isolated throwaway Jenkins** (same image and plugin set, no network): the official Declarative
+linter validates this `Jenkinsfile`; earlier runs there proved the sandboxed flag lookup, UNSTABLE →
+FAILURE and the head-check ABORTED result.
 
-| Check                                                                                       | Result                                                                                  |
-| ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Official Declarative linter (`declarative-linter`) on this `Jenkinsfile`                    | "Jenkinsfile successfully validated"; a broken control file is rejected                 |
-| `Validation Complete` flag lookup (`env."${flag}"`) in the Groovy sandbox, one flag missing | FAILURE "VALIDATION INCOMPLETE (CI): QA_IMPACTED_PASSED not set" (set flags were read)  |
-| `post { unstable }` conversion                                                              | UNSTABLE build finished FAILURE                                                         |
-| Head-check supersession (`currentBuild.result = 'ABORTED'` + `error`)                       | ABORTED                                                                                 |
-| Milestone cancellation (approval milestone, build N+1 passes a higher ordinal)              | older build NOT_BUILT, **no `post` section ran** (with or without a `notBuilt` handler) |
-| Approval answered by an identity not in the allow-list (Jenkins let it answer)              | FAILURE "'anonymous' is not an authorized UAT approver … Nothing is deployed to UAT."   |
-| Approval answered by an allow-listed identity                                               | SUCCESS; `input` returns the approver ID as a String                                    |
-| Approval rejected                                                                           | ABORTED ("Rejected")                                                                    |
-| Approval timeout                                                                            | ABORTED ("Timeout has been exceeded")                                                   |
-
-The milestone finding corrected the design: the `notBuilt` handler added earlier never runs and
-was removed; superseded `main` builds leave their build tag (see Recovery).
-
-**3. Local checks (this repository):** lint, format, typecheck, strict Cucumber dry run (52), test
-data audit, suite inventories 4/10/24/52, BDD structure (77 scenarios, 25 known defects; 4
-deliberate violations each detected), config check (positive, and negative: unpinned commit,
-unknown key, retries ≠ 0), impact map on 30 change sets (configurator files, CI/CD tooling,
-gate-defining files, a rename) and `--no-renames` on a real rename, `ci:impacted run` against the
-local QA environment (Regression 24/24, one feature 4/4, known-defect-only selection, missing
-base fails closed), Groovy parse, the stage-path simulation with fault injection (every required
-PR or push stage forced to skip → FAILURE), the result → GitHub mapping read from the installed
-checks-api and github-branch-source plugins, the host-lock primitive under 60 concurrent creates,
-`actionlint` on both workflows and the gate guard's matcher on sample file lists.
+**Local:** `npm run test:ci` (pipeline order and gates on the Jenkinsfile's own stage conditions,
+serialization structure, automatic promotion and its fail-closed checks, the application-image
+decision, PR Regression deferral, the gate-review policy including fail-closed), `npm run test:lock`
+(lock concurrency on the local Docker daemon), lint, format, typecheck, dry run, test-data audit,
+BDD structure, suite inventories, config check, actionlint, Groovy parse.
 
 ## Readiness: database initialized
 
