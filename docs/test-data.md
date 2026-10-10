@@ -75,3 +75,5 @@ ID `999999999` (deliberately non-existent identifiers, single scenario), and the
   customer; phone numbers collided across scenarios. After: every category unique per scenario,
   except state (50 valid codes) and the values a scenario provides on purpose (the taken username,
   PB-15's duplicate SSN, PB-16's blank names, PB-12's other person).
+
+*  temporary list item with a formatting violation (CI negative test, never merged)
