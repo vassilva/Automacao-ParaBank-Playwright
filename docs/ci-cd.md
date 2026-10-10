@@ -551,6 +551,23 @@ anyone else (verified on the isolated Jenkins).
 
 ## Failure, rollback and recovery
 
+Observed on the real Jenkins (2026-10-10), and what to do about it:
+
+- **Enabling the scan trigger builds every branch it has not built yet**, with that branch's own
+  Jenkinsfile. The first scan started `main` #2 on the old merge commit (whose old pipeline
+  promoted to UAT without approval) and the stale `feature/ci-jenkins-pipeline`. They were held at
+  the host lock (a manual lock owner) and aborted before building anything. Before enabling
+  scanning on a job, check which heads it has never built.
+- **A hard-killed build can keep its executor.** After a forced abort ("Hard kill!") the agent
+  container stayed up and one built-in executor stayed busy, so the next build waited with
+  "Still waiting to schedule task" (the `windows-agent` line in that message only means that node
+  is reserved for `windows` jobs). Prefer a normal abort; after a hard kill, restart Jenkins once
+  it is idle.
+- **Merged PRs:** the job discards removed branches, so the `PR-<n>` job and its builds disappear
+  after the merge (GitHub keeps the checks). The merged branch itself is then built once as a
+  branch job (Developer plan, never UAT) unless it is deleted; enabling "Automatically delete head
+  branches" avoids that build.
+
 - **PR check fails:** the merge stays blocked. Read the console and JUnit, fix, push (the new build
   supersedes the old one). No retries: a flaky failure is a defect to investigate, not to re-run
   blindly.
