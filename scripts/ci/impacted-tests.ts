@@ -7,17 +7,21 @@
  *
  * The base defaults to origin/$CHANGE_TARGET (Jenkins PR builds) or origin/main, and is fetched
  * when missing (a Jenkins PR checkout fetches only the PR ref; the repository is public). Files are
- * compared with the merge base (`git diff base...HEAD`), so later commits on main do not count.
+ * compared with the merge base (`git diff base...HEAD`), so later commits on main do not count;
+ * renames list both paths.
  *
  * Mapping (first matching rule wins, see RULES):
  *   - a feature file                         -> that feature
  *   - a domain's steps or page object        -> that domain's features
  *   - shared code (support layer, API client, factories, shared steps and pages, the Playwright
- *     adapter, runner configuration, dependencies), and the application build (docker/parabank,
- *     compose.yaml)                          -> the Regression suite (24)
- *   - documentation and CI tooling           -> nothing beyond the PR's Smoke
+ *     adapter, runner configuration, dependencies), the application build and environments
+ *     (docker/parabank, compose.yaml), and CI/CD tooling (Jenkinsfile, scripts, CI agent image)
+ *                                            -> the Regression suite (24)
+ *   - documentation, the secondary GitHub Actions workflow, lint/format/ignore rules
+ *                                            -> nothing beyond the PR's Smoke
  *   - anything the map does not know         -> the Regression suite (fail-safe)
- * Known-defect scenarios are never selected (the "full" profile excludes them).
+ * Known-defect scenarios are never selected (the "full" profile excludes them). Changes to the
+ * files that define the gates are also reported as GATE-DEFINING (see GATE_DEFINING).
  *
  * `run` executes the selection on the target configured by TARGET_ENV / PARABANK_BASE_URL with
  * reports in reports/<env>/impacted, then checks that exactly the selected scenarios ran, once,
@@ -108,16 +112,38 @@ const RULES: [RegExp, Impact | 'self', string][] = [
     'runner configuration',
   ],
   [/^(docker\/parabank\/|compose\.yaml$)/, REGRESSION, 'application build or runtime'],
-  // The target check the Playwright global setup runs before any test.
-  [/^scripts\/check-target\.ts$/, REGRESSION, 'test runtime target check'],
+  // High-risk tooling: the pipeline and its gates, deployment and readiness, the image build, the
+  // agent image (browser runtime), line-ending rules. Regression is cheap compared with a
+  // tooling change that silently weakens what QA proves.
+  [/^(Jenkinsfile|scripts\/|docker\/ci-agent\/|\.gitattributes$)/, REGRESSION, 'CI/CD tooling'],
   // No functional impact beyond the PR's Smoke.
   [/^docs\/|\.md$/, NONE, 'documentation'],
-  [/^(Jenkinsfile|scripts\/|docker\/ci-agent\/|\.github\/)/, NONE, 'CI tooling'],
+  [/^\.github\//, NONE, 'secondary GitHub Actions workflow'],
   [
-    /^(\.gitignore|\.gitattributes|\.prettierignore|\.prettierrc\.json|eslint\.config\.mjs|\.env\.example)$/,
+    /^(\.gitignore|\.prettierignore|\.prettierrc\.json|eslint\.config\.mjs|\.env\.example)$/,
     NONE,
-    'repository configuration',
+    'lint, format and ignore rules (checked by the Quality Gates)',
   ],
+];
+
+/**
+ * Files that define the gates themselves. A PR changing them is validated by the gates it changes
+ * (Jenkins runs the PR's own Jenkinsfile), so it must be reviewed and merged manually, never
+ * auto-merged (docs/ci-cd.md). Reported, not enforced: enforcement must come from GitHub.
+ */
+const GATE_DEFINING = [
+  /^Jenkinsfile$/,
+  /^scripts\/ci\//,
+  /^scripts\/audit-test-data\.ts$/,
+  /^cucumber\.js$/,
+  /^package(-lock)?\.json$/,
+  /^tsconfig\.json$/,
+  /^playwright\//,
+  /^playwright(\.[a-z-]+)?\.config(\.base)?\.ts$/,
+  /^docker\/ci-agent\//,
+  /^eslint\.config\.mjs$/,
+  /^\.prettier(rc\.json|ignore)$/,
+  /^docs\/github-ruleset-main\.json$/,
 ];
 
 function git(args: string[]): string {
@@ -163,11 +189,13 @@ export interface Selection {
   changed: { file: string; impact: string; reason: string }[];
   kind: 'none' | 'regression' | 'features';
   features: string[];
+  gateDefining: string[];
 }
 
 export function select(): Selection {
   const base = baseRef();
-  const changed = git(['diff', '--name-only', `${base}...HEAD`])
+  // --no-renames: a rename lists both paths, so moving shared code still selects its impact.
+  const changed = git(['diff', '--name-only', '--no-renames', `${base}...HEAD`])
     .split('\n')
     .map((file) => file.trim())
     .filter(Boolean);
@@ -176,9 +204,10 @@ export function select(): Selection {
 
 /** The selection for a list of changed files (exported to check the map without git). */
 export function classify(base: string, changed: string[]): Selection {
-  const selection: Selection = { base, changed: [], kind: 'none', features: [] };
+  const selection: Selection = { base, changed: [], kind: 'none', features: [], gateDefining: [] };
   const files = new Set<string>();
   for (const file of changed) {
+    if (GATE_DEFINING.some((pattern) => pattern.test(file))) selection.gateDefining.push(file);
     const rule = RULES.find(([pattern]) => pattern.test(file));
     const impact = rule ? rule[1] : REGRESSION;
     const reason = rule ? rule[2] : 'not in the impact map (fail-safe)';
@@ -244,7 +273,7 @@ function run(selection: Selection): void {
   mkdirSync(reportsDir, { recursive: true });
   writeFileSync(path.join(reportsDir, 'selection.json'), `${JSON.stringify(selection, null, 2)}\n`);
   if (selection.kind === 'none') {
-    console.log('IMPACTED TESTS: none beyond Smoke (documentation or CI tooling only).');
+    console.log('IMPACTED TESTS: none beyond Smoke (documentation, lint or ignore rules only).');
     return;
   }
   if (selection.kind === 'features' && runnableScenarios(selection.features) === 0) {
@@ -316,6 +345,12 @@ function main(): void {
     `SELECTION: ${selection.kind}` +
       (selection.kind === 'features' ? ` (${selection.features.join(', ')})` : ''),
   );
+  if (selection.gateDefining.length > 0) {
+    console.log(
+      `GATE-DEFINING CHANGE (${selection.gateDefining.join(', ')}): this PR changes the checks ` +
+        'that validate it. Review it and merge it manually; do not enable auto-merge.',
+    );
+  }
   if (command === 'run') run(selection);
 }
 

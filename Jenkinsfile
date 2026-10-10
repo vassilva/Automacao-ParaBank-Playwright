@@ -11,10 +11,12 @@
 //                                         Tests (vs main)
 //     config/*              CONFIGURATOR  Quality Gates -> Config Check. No image, no deployment,
 //                                         no host lock.
-//   PULL REQUEST (CI)  Quality Gates -> Build Image -> Deploy QA -> QA Ready -> QA Smoke (4) -> QA
-//                      Impacted Tests (scripts/ci/impacted-tests.ts: the PR's changed files vs the
-//                      target branch; shared code -> Regression (24)). No UAT. This build's result
-//                      is the "Jenkins" check GitHub requires before (auto-)merging.
+//   PULL REQUEST (CI)  Quality Gates -> Config Check -> Build Image -> Deploy QA -> QA Ready -> QA
+//                      Smoke (4) -> QA Impacted Tests (scripts/ci/impacted-tests.ts: the PR's
+//                      changed files vs the target branch; shared code, environments and CI/CD
+//                      tooling -> Regression (24)) -> QA Gate -> Validation Complete. No UAT. This
+//                      build's result is the "Jenkins" check (and the pr-head commit status) GitHub
+//                      requires before (auto-)merging.
 //   MAIN (CD)          Build and QA:   Quality Gates -> Build Image -> Deploy QA -> QA Ready
 //                                      -> QA Regression (24). No QA Smoke.
 //                      UAT Approval:   mandatory input by an authorized approver (no agent, no
@@ -24,8 +26,13 @@
 //                                      (same image ID) -> UAT Ready -> UAT Smoke (4)
 //                                      [-> Known Defects, optional] -> Deployment Record.
 //
-// SUPERSEDING (milestones, no disableConcurrentBuilds): a newer build of the same branch or PR
-// aborts the older one at once. On main, builds run to QA Regression in order (host lock); a build
+// SUPERSEDING (no disableConcurrentBuilds): a PR or branch build checks that its commit is still
+// the PR/branch head when it starts and again once it holds the host lock, and ends ABORTED
+// otherwise. It never uses a milestone: a build cancelled by a milestone ends NOT_BUILT, which the
+// checks plugin publishes as a "skipped" Jenkins check, and GitHub counts a skipped (or neutral)
+// required check as passing. For the same reason any NOT_BUILT build is turned into ABORTED and,
+// on PR and branch builds, UNSTABLE into FAILURE (see the pipeline post section).
+// On main (milestones), builds run to QA Regression in order (host lock); a build
 // that reaches the approval aborts any older build still waiting for approval, an older build can
 // no longer request or pass approval once a newer one did, and a build already approved and
 // deploying to UAT is never interrupted. Verify Approved Image also aborts (SUPERSEDED) unless the
@@ -97,14 +104,43 @@ def removeBuildImageTag() {
   }
 }
 
+// PR and branch builds: a build whose commit is no longer the head of its PR or branch is
+// pointless; it ends ABORTED (GitHub check "cancelled", commit status "error": never passing).
+// Not a milestone: see SUPERSEDING in the header. If the head cannot be read the build simply
+// continues: finishing a build is always safe, only wasteful.
+def abortIfSuperseded() {
+  if (env.BUILD_MODE == 'MAIN' || !env.GIT_COMMIT) {
+    return
+  }
+  def ref = env.CHANGE_ID ? "refs/pull/${env.CHANGE_ID}/head" : "refs/heads/${env.BRANCH_NAME}"
+  def head = ''
+  withEnv(["SUPERSEDE_REF=${ref}"]) {
+    // The remote URL is never traced (set +x).
+    head = sh(returnStdout: true, script: '''
+      set +x
+      url=$(git -c safe.directory='*' config --get remote.origin.url)
+      git ls-remote "$url" "$SUPERSEDE_REF" 2>/dev/null | cut -f1 || true
+    ''').trim()
+  }
+  if (!(head ==~ /[0-9a-f]{40}/)) {
+    echo "Could not read ${ref}; continuing (superseding is only an optimization)."
+    return
+  }
+  if (head != env.GIT_COMMIT) {
+    currentBuild.result = 'ABORTED'
+    error("SUPERSEDED: ${ref} is now at ${head}; this build validates ${env.GIT_COMMIT}. The newer commit has its own build.")
+  }
+}
+
 pipeline {
   agent none
 
   options {
     buildDiscarder(logRotator(numToKeepStr: '20'))
     timestamps()
-    // No disableConcurrentBuilds(): superseding is done with milestones (see the header), and the
-    // host lock serializes every build that builds, deploys or tests.
+    // No disableConcurrentBuilds(): superseding is done by head checks (PR, branch) and milestones
+    // (main approval), see the header; the host lock serializes every build that builds, deploys
+    // or tests.
   }
 
   parameters {
@@ -164,11 +200,6 @@ pipeline {
           env.DEPLOYS_QA = env.PIPELINE_ROLE == 'CONFIGURATOR' ? 'false' : 'true'
           env.RUNS_SMOKE = (env.BUILD_MODE == 'PULL REQUEST' || env.PIPELINE_ROLE == 'DEVELOPER') ? 'true' : 'false'
           env.RUNS_IMPACTED = (env.BUILD_MODE == 'PULL REQUEST' || env.PIPELINE_ROLE == 'QA') ? 'true' : 'false'
-          // A newer build of a branch or PR aborts this one (an older build whose last milestone is
-          // lower is cancelled). Main builds are not superseded here, only at the approval.
-          if (env.BUILD_MODE != 'MAIN') {
-            milestone(ordinal: Integer.parseInt(env.BUILD_NUMBER), label: 'Newest build of this branch or PR')
-          }
           // <branch, 12 chars max>-<build number>-<hash of the full BUILD_TAG>: unique across jobs.
           def branchPart = (env.BRANCH_NAME ?: 'build').toLowerCase().replaceAll('[^a-z0-9]+', '-').replaceAll('^-+', '')
           if (branchPart.length() > 12) {
@@ -226,6 +257,9 @@ pipeline {
               test "$CUCUMBER_PARALLEL" = "1"
               test "$CUCUMBER_RETRY" = "0"
             '''
+            script {
+              abortIfSuperseded()
+            }
           }
         }
 
@@ -253,14 +287,18 @@ pipeline {
           }
         }
 
-        // CONFIGURATOR pushes (config/*): the environment configuration renders for QA and UAT,
-        // requires an image ID, and keeps their projects and ports distinct. Nothing is deployed.
+        // CONFIGURATOR pushes (config/*) and every pull request: the environment configuration
+        // renders for QA and UAT, requires an image ID, and keeps their projects and ports distinct.
+        // Needs no lock and touches no environment.
         stage('Config Check') {
           when {
-            expression { env.PIPELINE_ROLE == 'CONFIGURATOR' }
+            expression { env.PIPELINE_ROLE == 'CONFIGURATOR' || env.BUILD_MODE == 'PULL REQUEST' }
           }
           steps {
-            sh 'npm run -s ci:config-check'
+            script {
+              sh 'npm run -s ci:config-check'
+              env.CONFIG_CHECK_PASSED = 'true'
+            }
           }
         }
 
@@ -270,6 +308,10 @@ pipeline {
           }
           steps {
             sh 'npm run -s ci:lock -- acquire "$BUILD_TAG"'
+            // The wait for the lock can be long: do not build, deploy and test a superseded commit.
+            script {
+              abortIfSuperseded()
+            }
           }
         }
 
@@ -339,7 +381,8 @@ pipeline {
 
         // Pull requests (after Smoke) and QA pushes: the scenarios the change can affect, chosen
         // from its changed files against the target branch (scripts/ci/impacted-tests.ts; shared
-        // code -> the whole Regression suite, documentation and CI tooling -> nothing more), then
+        // code, environments and CI/CD tooling -> the whole Regression suite, documentation ->
+        // nothing more; gate-defining changes are reported for manual merge), then
         // checked to have run exactly, once, and passed. With Smoke, this is the PR's "Jenkins"
         // check that GitHub requires before a merge or an auto-merge.
         stage('QA Impacted Tests') {
@@ -353,16 +396,26 @@ pipeline {
             ]) {
               sh 'npm run -s ci:impacted -- run'
             }
+            script {
+              env.QA_IMPACTED_PASSED = 'true'
+            }
           }
         }
 
-        // The QA gate of a CI build: every validation its role requires passed.
+        // The QA gate of a CI build: every validation its role requires actually ran and passed
+        // (a skipped stage must never count as a pass).
         stage('QA Gate') {
           when {
             expression { env.BUILD_MODE != 'MAIN' && env.DEPLOYS_QA == 'true' }
           }
           steps {
             script {
+              if (env.RUNS_SMOKE == 'true' && env.QA_SMOKE_PASSED != 'true') {
+                error('QA GATE: QA Smoke is required for this build and did not pass.')
+              }
+              if (env.RUNS_IMPACTED == 'true' && env.QA_IMPACTED_PASSED != 'true') {
+                error('QA GATE: QA Impacted Tests are required for this build and did not pass.')
+              }
               env.QA_GATE_PASSED = 'true'
               echo "QA GATE PASSED (${env.PIPELINE_ROLE}): smoke ${env.RUNS_SMOKE}, impacted tests ${env.RUNS_IMPACTED}"
             }
@@ -432,6 +485,38 @@ pipeline {
           }
           // Traces are never produced in CI; reports and logs are redacted (docs/ci-cd.md).
           archiveArtifacts artifacts: 'reports/**, build/**', allowEmptyArchive: true
+        }
+      }
+    }
+
+    // PR and branch builds: the build may end SUCCESS (for a PR: a passing "Jenkins" check, which
+    // can trigger an auto-merge) only if every validation of its plan ran and passed. Each flag is
+    // set only as the last statement of its stage, so a skipped or failed stage leaves it unset.
+    stage('Validation Complete') {
+      when {
+        expression { env.BUILD_MODE != 'MAIN' }
+      }
+      steps {
+        script {
+          def required = [
+            'DEVELOPER'   : ['QA_SMOKE_PASSED', 'QA_GATE_PASSED'],
+            'QA'          : ['QA_IMPACTED_PASSED', 'QA_GATE_PASSED'],
+            'CONFIGURATOR': ['CONFIG_CHECK_PASSED'],
+            'CI'          : ['CONFIG_CHECK_PASSED', 'QA_SMOKE_PASSED', 'QA_IMPACTED_PASSED', 'QA_GATE_PASSED'],
+          ][env.PIPELINE_ROLE]
+          if (required == null || (env.BUILD_MODE == 'PULL REQUEST' && env.PIPELINE_ROLE != 'CI')) {
+            error("VALIDATION INCOMPLETE: no validation plan for ${env.BUILD_MODE} / ${env.PIPELINE_ROLE}.")
+          }
+          def missing = []
+          for (String flag : required) {
+            if (env."${flag}" != 'true') {
+              missing << flag
+            }
+          }
+          if (!missing.isEmpty()) {
+            error("VALIDATION INCOMPLETE (${env.PIPELINE_ROLE}): ${missing.join(', ')} not set.")
+          }
+          echo "VALIDATION COMPLETE (${env.BUILD_MODE}, ${env.PIPELINE_ROLE}): ${required.join(', ')}"
         }
       }
     }
@@ -706,6 +791,24 @@ pipeline {
         if (env.QA_REGRESSION_PASSED == 'true' && env.UAT_IMAGE_ID == null) {
           removeBuildImageTag()
         }
+      }
+    }
+    // The checks plugin publishes UNSTABLE as "neutral" (when so configured) and NOT_BUILT as
+    // "skipped"; GitHub counts both as a passing required check. A PR or branch build is either
+    // validated (SUCCESS) or not: UNSTABLE becomes FAILURE (a worse result, so Jenkins accepts it).
+    unstable {
+      script {
+        if (env.BUILD_MODE != 'MAIN') {
+          currentBuild.result = 'FAILURE'
+        }
+      }
+    }
+    // NOT_BUILT (e.g. a main build cancelled by the approval milestone) becomes ABORTED, which is
+    // never a passing check, and the build's image tag is removed as for any abort.
+    notBuilt {
+      script {
+        currentBuild.result = 'ABORTED'
+        removeBuildImageTag()
       }
     }
   }

@@ -60,8 +60,18 @@ reaches UAT without the manual Jenkins approval.
 The Config Check renders `compose.yaml` for QA and UAT exactly as `scripts/environment.ts` would,
 and fails unless each renders with its own Compose project and its own loopback port, the image is
 the one passed in, and Compose refuses to render without an image (no silent default image). It
-needs no lock and never touches QA or UAT. Once a PR is open, every branch, whatever its prefix, is
-validated by the PR plan below.
+needs no lock and never touches QA or UAT, so a `config/*` push is never queued behind a QA build
+(measured locally: Quality Gates + Config Check ≈ 75 s, plus `npm ci` and the agent start).
+
+**A `config/*` push is not the configuration's validation.** Once a PR is open, every branch,
+whatever its prefix, is validated by the full PR plan: Quality Gates, Config Check, build, deploy
+QA, **QA Smoke (4)** and **QA Impacted Tests**. Jenkins discovers branches "excluding those filed as
+PRs", so an open PR is never built with the lighter push plan, and the PR check is the one GitHub
+requires. Configuration files select the whole Regression (24): `compose.yaml`,
+`src/support/environments.ts`, `src/support/config.ts`, `docker/parabank/**` (application version
+and build), `cucumber.js`, `package*.json`, `tsconfig.json`, Playwright configs, the Jenkinsfile,
+`scripts/**` and the CI agent image. No configuration-specific business tests are added: ParaBank's
+behaviour is covered by the existing scenarios, and Regression is the strongest set that runs on QA.
 
 ## QA Impacted Tests (pull requests and `qa/*` pushes)
 
@@ -70,20 +80,29 @@ PR, `origin/main` for a push) at the **merge base**, so later commits on `main` 
 PR checkouts fetch only the PR ref, so the script fetches the target branch anonymously from the
 (public) repository when it is missing; if it cannot, the stage fails (fail-closed).
 
-| Changed files                                                                                                                                                                                                                                                                                             | Runs                            |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| a feature file                                                                                                                                                                                                                                                                                            | that feature                    |
-| a domain's steps or page object (e.g. `transfer.steps.ts`, `bill-pay.page.ts`)                                                                                                                                                                                                                            | that domain's features          |
-| shared code: `src/support`, `src/api`, `src/factories`, `src/utils`, shared steps (customer, feedback, ledger) and pages (home, menu, feedback, index), `playwright/`, Playwright configs, `cucumber.js`, `package*.json`, `tsconfig.json`, `scripts/check-target.ts`, `docker/parabank/`, `compose.yaml` | **Regression (24)**             |
-| documentation, `Jenkinsfile`, other `scripts/`, `docker/ci-agent/`, `.github/`, lint/format configs, `.env.example`                                                                                                                                                                                       | nothing beyond Smoke            |
-| anything the map does not know (e.g. a new page object)                                                                                                                                                                                                                                                   | **Regression (24)** (fail-safe) |
+| Changed files                                                                                                                                                                                                                                                                  | Runs                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- |
+| a feature file                                                                                                                                                                                                                                                                 | that feature                    |
+| a domain's steps or page object (e.g. `transfer.steps.ts`, `bill-pay.page.ts`)                                                                                                                                                                                                 | that domain's features          |
+| shared code: `src/support`, `src/api`, `src/factories`, `src/utils`, shared steps (customer, feedback, ledger) and pages (home, menu, feedback, index), `playwright/`, Playwright configs, `cucumber.js`, `package*.json`, `tsconfig.json`, `docker/parabank/`, `compose.yaml` | **Regression (24)**             |
+| CI/CD tooling (high risk): `Jenkinsfile`, `scripts/**`, `docker/ci-agent/**`, `.gitattributes`                                                                                                                                                                                 | **Regression (24)**             |
+| documentation (`docs/**`, `*.md`), the secondary `.github/` workflow, lint/format/ignore rules (checked by the Quality Gates), `.env.example` (never loaded in CI)                                                                                                             | nothing beyond Smoke            |
+| anything the map does not know (e.g. a new page object)                                                                                                                                                                                                                        | **Regression (24)** (fail-safe) |
 
 Known-defect scenarios are never selected (the `full` profile excludes them); a selection that
 contains only known defects runs nothing and does not gate. After the run, the coverage validator
 checks that exactly the selected scenarios ran, once each, and passed (`--paths` for a feature
 selection, `--expect 24` for Regression). The selection is archived as
 `reports/qa/impacted/selection.json`. The map lives in the script (`RULES`); a new domain needs a
-new rule, and until then its files select Regression.
+new rule, and until then its files select Regression. Renames list both the old and the new path
+(`--no-renames`), so moving shared code into a domain file still selects Regression.
+
+**Gate-defining changes** (`GATE_DEFINING`: the Jenkinsfile, `scripts/ci/**`, the test-data audit,
+`cucumber.js`, `package*.json`, `tsconfig.json`, the Playwright adapter and configs, the CI agent
+image, lint/format configs, the ruleset file) are reported in the console and in `selection.json`
+as `GATE-DEFINING CHANGE`. Jenkins validates a PR with **the PR's own Jenkinsfile and scripts**, so
+such a PR can weaken the checks that judge it; it is merged manually after review, never
+auto-merged (see the auto-merge policy).
 
 ## Repository, branches and merge protection
 
@@ -91,19 +110,41 @@ new rule, and until then its files select Regression.
   default branch). Work happens on `feature/*` branches and reaches `main` only through a PR.
 - **Required check:** the GitHub check run **`Jenkins`**, published by the GitHub App
   `jenkins-qa-automation` (app ID **4991392**) for every Jenkins build. For a PR build it carries the
-  result of the whole PR pipeline: Quality Gates, QA Smoke, QA Impacted Tests and their count
-  checks. Observed on PR #1, together
-  with `Tests / Build, Deploy and Validate` (named after a stage, so it changes when stages are
-  renamed) and the commit status `continuous-integration/jenkins/pr-head` (named after the PR
-  discovery strategy). `Jenkins`, pinned to the App's integration ID, is the stable choice: no other
-  app or user can satisfy it.
+  result of the whole PR pipeline: Quality Gates, Config Check, QA Smoke, QA Impacted Tests, their
+  count checks, and the final **Validation Complete** stage, which fails the build unless every
+  validation of the plan actually ran and passed (a skipped stage never counts as a pass). Observed
+  on PR #1, together with `Tests / Build, Deploy and Validate` (named after a stage, so it changes
+  when stages are renamed; not required) and the commit status
+  `continuous-integration/jenkins/pr-head` (named after the PR discovery strategy). Both `Jenkins`
+  and the status are posted by app 4991392 (`jenkins-qa-automation[bot]`).
+- **Why two required signals.** Read from the installed plugins (checks-api 402,
+  github-branch-source 1967):
+
+  | Jenkins result | `Jenkins` check run                | `pr-head` commit status | GitHub treats it as |
+  | -------------- | ---------------------------------- | ----------------------- | ------------------- |
+  | SUCCESS        | success                            | success                 | pass                |
+  | UNSTABLE       | neutral (if configured) or failure | failure                 | **neutral = pass**  |
+  | FAILURE        | failure                            | error                   | fail                |
+  | NOT_BUILT      | **skipped**                        | error                   | **skipped = pass**  |
+  | ABORTED        | cancelled                          | error                   | fail                |
+  | running        | in progress                        | pending                 | blocks              |
+
+  GitHub counts a skipped or neutral required **check** as passing; a commit **status** passes only
+  when `success`. The pipeline therefore never ends a PR build NOT_BUILT or UNSTABLE (no milestones
+  on PR/branch builds; `post`: NOT_BUILT → ABORTED, UNSTABLE → FAILURE), and the ruleset requires
+  **both** the `Jenkins` check and the `continuous-integration/jenkins/pr-head` status from app
+  4991392, so that even a regression of the pipeline cannot turn a non-validated build into a merge.
+  Caveat: the status name follows Jenkins' PR discovery strategy; switching to "merge" would rename
+  it to `pr-merge` and block every PR until the ruleset is updated (fail-safe).
+
 - **Protection (to be applied, see Manual configuration):** the repository ruleset
   [`github-ruleset-main.json`](github-ruleset-main.json) on the default branch requires a pull
-  request, requires the `Jenkins` check from app 4991392 to pass on a branch that is up to date with
-  `main` (a failing, pending or missing check blocks the merge button), blocks direct pushes,
-  force-pushes and deletion, and has **no bypass actors**. It requires no review approval, because a
-  single maintainer cannot approve their own PR. Rulesets and branch protection are available on
-  public repositories on every GitHub plan.
+  request, requires the `Jenkins` check and the `pr-head` status from app 4991392 to pass on a
+  branch that is up to date with `main` (a failing, pending or missing check blocks the merge),
+  blocks direct pushes, force-pushes and deletion, and has **no bypass actors**. It requires no
+  review approval, because a single maintainer cannot approve their own PR. Rulesets and branch
+  protection are available on public repositories on every GitHub plan. The repository owner can
+  still edit or disable the ruleset; that is an administrative action outside any PR.
 - **Up to date, not a merge queue:** merge queues are available only for organization-owned
   repositories; this repository belongs to a user account. "Require branches to be up to date"
   (`strict_required_status_checks_policy: true`) gives the same guarantee for one PR at a time: the
@@ -115,10 +156,13 @@ new rule, and until then its files select Regression.
   `allow_auto_merge` only makes the option available; nothing enables it automatically. It is
   enabled intentionally, per eligible PR, by its author or a maintainer:
   `gh pr merge <n> --auto --merge` (or "Enable auto-merge" on the PR). A PR is eligible when it is
-  ready for review (not a draft), targets `main`, comes from this repository, and its author wants it
-  in `main` as soon as it is validated. GitHub then merges it only when every ruleset rule is
-  satisfied: the `Jenkins` check passed on an up-to-date head. A missing, pending, failing or
-  cancelled check blocks the merge; a new push re-runs the check and the merge waits for it. GitHub
+  ready for review (not a draft), targets `main`, comes from this repository, its author wants it in
+  `main` as soon as it is validated, and its Jenkins log shows **no `GATE-DEFINING CHANGE`**. A PR
+  that changes the Jenkinsfile, `scripts/ci/**`, the runner configuration or the agent image is
+  reviewed and merged manually: it is judged by the very checks it modifies. GitHub then merges an
+  eligible PR only when every ruleset rule is satisfied: the `Jenkins` check and the `pr-head`
+  status passed on an up-to-date head. A missing, pending, failing, cancelled or errored signal
+  blocks the merge; a new push re-runs the check and the merge waits for it. GitHub
   disables auto-merge itself if someone without write access pushes to the PR branch or the base
   branch is changed. `gh pr merge <n> --disable-auto` cancels it.
 - **Jenkins job:** Multibranch Pipeline `Automacao-ParaBank-Playwright` (GitHub Branch Source,
@@ -135,20 +179,21 @@ new rule, and until then its files select Regression.
 
 ## Stages, in execution order
 
-| #   | Stage                                 | PR / PUSH | MAIN | What it does                                                                                                                                                                                                                                             |
-| --- | ------------------------------------- | :-------: | :--: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Build Context                         |     ✓     |  ✓   | Build mode (`CHANGE_ID` → PR; `PARABANK_MAIN_BRANCH`, default `main` → MAIN; otherwise PUSH), push role by prefix, build image tag; PR/PUSH: milestone that aborts older builds of the same branch or PR                                                 |
-| 2   | **Build and QA** (agent, host lock)   |     ✓     |  ✓   | Workspace Guard (1 worker, 0 retries, no `.env`) → Install → Quality Gates → [Config Check, `config/*` only, and stop] → Acquire Host Lock → Build Image (once) → Deploy QA → QA Ready (healthy, database initialized, exact image ID)                   |
-| 2a  | ↳ QA Smoke                            |  PR, dev  |  –   | CI gate: `test:smoke`, then 4/4 executed once and passed                                                                                                                                                                                                 |
-| 2b  | ↳ QA Impacted Tests                   |  PR, qa   |  –   | `ci:impacted run`: the change's selection (see above), then exactly the selected scenarios executed once and passed                                                                                                                                      |
-| 2c  | ↳ QA Gate                             |     ✓     |  –   | Sets `QA_GATE_PASSED` once every validation of the role passed (not for `config/*`)                                                                                                                                                                      |
-| 2d  | ↳ QA Regression                       |     –     |  ✓   | **Deployment gate**: `test:regression`, then 24/24 executed once and passed                                                                                                                                                                              |
-| 2e  | ↳ QA Additional Suite                 |    opt    | opt  | Parameter `ADDITIONAL_QA_SUITE` = `sanity` (10) or `full` (52), after the QA gate passed                                                                                                                                                                 |
-| 3   | **UAT Approval** (no agent, no lock)  |     –     |  ✓   | Only if QA Regression passed. Milestone (supersedes older waiting builds), mandatory `input` restricted to `PARABANK_UAT_APPROVERS`, timeout `PARABANK_UAT_APPROVAL_MINUTES` (default 60), approver re-checked, milestone "UAT approved"                 |
-| 4   | **UAT Deployment** (agent, host lock) |     –     |  ✓   | Only after an authorized approval: Workspace Guard → Install → Host Lock → Verify Approved Image (commit still main's head, same image ID) → Promote to UAT (same image ID, no rebuild) → UAT Ready (healthy, database initialized, identity = approved) |
-| 4a  | ↳ UAT Smoke                           |     –     |  ✓   | Post-deployment verification: `test:smoke`, then 4/4                                                                                                                                                                                                     |
-| 4b  | ↳ Known Defects                       |     –     | opt  | Parameter `RUN_KNOWN_DEFECTS`, after UAT Smoke passed: 25 known-defect scenarios; at most UNSTABLE                                                                                                                                                       |
-| 4c  | ↳ Deployment Record                   |     –     |  ✓   | `deployment/deployment-record.txt`: source commit, built/QA/UAT image IDs, approver, validation counts                                                                                                                                                   |
+| #   | Stage                                 | PR / PUSH | MAIN | What it does                                                                                                                                                                                                                                                                                                       |
+| --- | ------------------------------------- | :-------: | :--: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Build Context                         |     ✓     |  ✓   | Build mode (`CHANGE_ID` → PR; `PARABANK_MAIN_BRANCH`, default `main` → MAIN; otherwise PUSH), push role by prefix, build image tag                                                                                                                                                                                 |
+| 2   | **Build and QA** (agent, host lock)   |     ✓     |  ✓   | Workspace Guard (1 worker, 0 retries, no `.env`; PR/branch: superseded → ABORTED) → Install → Quality Gates → [Config Check: PR and `config/*`; `config/*` stops here] → Acquire Host Lock (then superseded → ABORTED) → Build Image (once) → Deploy QA → QA Ready (healthy, database initialized, exact image ID) |
+| 2a  | ↳ QA Smoke                            |  PR, dev  |  –   | CI gate: `test:smoke`, then 4/4 executed once and passed                                                                                                                                                                                                                                                           |
+| 2b  | ↳ QA Impacted Tests                   |  PR, qa   |  –   | `ci:impacted run`: the change's selection (see above), then exactly the selected scenarios executed once and passed                                                                                                                                                                                                |
+| 2c  | ↳ QA Gate                             |     ✓     |  –   | Fails unless every suite the role requires ran and passed; then sets `QA_GATE_PASSED` (not for `config/*`)                                                                                                                                                                                                         |
+| 2d  | ↳ QA Regression                       |     –     |  ✓   | **Deployment gate**: `test:regression`, then 24/24 executed once and passed                                                                                                                                                                                                                                        |
+| 2e  | ↳ QA Additional Suite                 |    opt    | opt  | Parameter `ADDITIONAL_QA_SUITE` = `sanity` (10) or `full` (52), after the QA gate passed                                                                                                                                                                                                                           |
+| 2f  | **Validation Complete** (no agent)    |     ✓     |  –   | Fails unless every flag of the plan is set (PR: Config Check, Smoke, Impacted Tests, QA Gate); a skipped stage never counts as a pass                                                                                                                                                                              |
+| 3   | **UAT Approval** (no agent, no lock)  |     –     |  ✓   | Only if QA Regression passed. Milestone (supersedes older waiting builds), mandatory `input` restricted to `PARABANK_UAT_APPROVERS`, timeout `PARABANK_UAT_APPROVAL_MINUTES` (default 60), approver re-checked, milestone "UAT approved"                                                                           |
+| 4   | **UAT Deployment** (agent, host lock) |     –     |  ✓   | Only after an authorized approval: Workspace Guard → Install → Host Lock → Verify Approved Image (commit still main's head, same image ID) → Promote to UAT (same image ID, no rebuild) → UAT Ready (healthy, database initialized, identity = approved)                                                           |
+| 4a  | ↳ UAT Smoke                           |     –     |  ✓   | Post-deployment verification: `test:smoke`, then 4/4                                                                                                                                                                                                                                                               |
+| 4b  | ↳ Known Defects                       |     –     | opt  | Parameter `RUN_KNOWN_DEFECTS`, after UAT Smoke passed: 25 known-defect scenarios; at most UNSTABLE                                                                                                                                                                                                                 |
+| 4c  | ↳ Deployment Record                   |     –     |  ✓   | `deployment/deployment-record.txt`: source commit, built/QA/UAT image IDs, approver, validation counts                                                                                                                                                                                                             |
 
 The approval runs between two agent stages on purpose: while it waits, the pipeline holds **no
 executor, workspace or host lock**, so other pipelines (PR builds, other jobs) keep running. The
@@ -310,26 +355,36 @@ QA and UAT are shared by every job of the host, so the build, deploy and test pa
 holds a **host-wide lock** (`scripts/ci/host-lock.ts`): an atomic Docker network labelled with the
 owner (`BUILD_TAG`); waiters poll for at most 60 min (`PARABANK_LOCK_WAIT_MINUTES`); a lock older
 than 150 min (`PARABANK_LOCK_STALE_MINUTES`) is removed loudly; it is released in `post`, also on
-failure or abort. Cucumber always runs with one worker and no retries (checked by the Workspace
-Guard).
+failure or abort, and only by its owner. Cucumber always runs with one worker and no retries
+(checked by the Workspace Guard). The atomicity was checked on the lab daemon (Docker 29.7.2):
+5 rounds of 12 simultaneous `docker network create` of one name produced exactly one network each.
 
-**Superseding (milestones, `pipeline-milestone-step`).** `disableConcurrentBuilds()` is gone: it
-would make a newer `main` build wait behind an older one sitting at the approval. Instead, as decoded
-from the installed plugin (138.v78ca_76831a_43): when a build passes milestone ordinal _N_, every
-**older** running build of the same job whose last milestone is lower is aborted, and the build
-itself is aborted if a **newer** one already passed _N_ or more.
+What the lock covers, per build: Build Image → Deploy QA → QA Ready → suites → QA teardown (PR,
+`feature/*`, `qa/*`, `main`), and separately UAT promotion → UAT Smoke (`main`, after approval).
+`config/*` pushes take no lock. The approval wait holds no lock, executor or workspace.
 
-- PR and branch builds pass ordinal = build number in Build Context: a new push aborts the older
-  build of the same PR or branch at once (its `post` still tears down and releases the lock).
-- `main` builds run concurrently up to QA Regression (the host lock serializes them, in order).
-  At the approval each passes ordinal = build number, which aborts any **older build still waiting
-  for approval**, and aborts this build if a **newer** one already asked for approval. After the
-  approval each passes ordinal 1 000 000 000: a build already approved and deploying is never
-  aborted by a newer build reaching the approval, and an older build approved after a newer one was
-  approved is aborted.
-- Verify Approved Image also reads `main`'s head (`git ls-remote`, the URL is not traced): if `main`
-  moved on since this build's commit, the build ends ABORTED "SUPERSEDED" before anything is deployed.
-  Only the latest validated image can reach UAT; nothing older does.
+**Superseding.** `disableConcurrentBuilds()` is gone: it would make a newer `main` build wait behind
+an older one sitting at the approval.
+
+- **PR and branch builds use no milestone.** A build cancelled by a milestone ends NOT_BUILT, which
+  the checks plugin publishes as a _skipped_ `Jenkins` check, and GitHub counts skipped required
+  checks as passing (see "Why two required signals"). Instead, the build compares its commit with
+  the PR/branch head (`git ls-remote`, URL never traced) in the Workspace Guard and again right
+  after acquiring the lock (the long wait), and ends **ABORTED** ("SUPERSEDED", check
+  _cancelled_, status _error_) if a newer commit exists. If the head cannot be read it continues:
+  finishing a build is always safe. Two builds of the same commit both run to their own result.
+- **`main` uses milestones** (decoded from the installed plugin 138.v78ca_76831a_43: passing ordinal
+  _N_ aborts every older running build of the job whose last milestone is lower, and aborts the
+  build itself if a newer one already passed _N_ or more). `main` builds run up to QA Regression in
+  order (host lock). At the approval each passes ordinal = build number, which aborts any **older
+  build still waiting for approval**, and aborts this build if a **newer** one already asked. After
+  the approval each passes ordinal 1 000 000 000: a build already approved and deploying is never
+  aborted by a newer one, and an older build approved after a newer one was approved is aborted.
+  A cancelled `main` build (NOT_BUILT) is turned into ABORTED and its image tag removed. `main`'s
+  check never gates a merge.
+- Verify Approved Image reads `main`'s head: if `main` moved on since this build's commit, the build
+  ends ABORTED "SUPERSEDED" before anything is deployed. Only the latest validated image can reach
+  UAT.
 
 **Shared QA risks and how they are handled:**
 
@@ -340,7 +395,37 @@ itself is aborted if a **newer** one already passed _N_ or more.
 | QA runs a PR candidate after the main build moved on to approval | Expected: approval and UAT use the image **ID**, not QA's current state; Verify Approved Image checks the image still exists and its revision     |
 | Several PRs auto-merge in a row                                  | Each merge starts a `main` build; they validate in order; the newest reaching approval supersedes older waiting ones; the head check blocks older |
 | A PR validated against an old `main`                             | Required check is strict (up to date): out-of-date PRs cannot merge until updated and re-validated                                                |
-| PR checks wait while another build holds QA                      | Bounded lock wait (60 min) and stage timeouts; the approval holds no lock                                                                         |
+| A superseded PR build reports a passing check                    | No milestones on PR builds; NOT_BUILT → ABORTED, UNSTABLE → FAILURE; the ruleset also requires the `pr-head` status (success only)                |
+| PR checks wait while another build holds QA                      | Bounded lock wait (60 min) and stage timeouts; superseded builds stop after the wait; the approval holds no lock                                  |
+
+**Expected bottleneck.** Everything that deploys is serialized by the lock. Measured in the two
+real builds, the ParaBank image build alone took 280 s and 315 s (it compiles the pinned source and
+runs ParaBank's own 239 tests, `PARABANK_BUILD_FRESH=true`); locally, Regression (24) ran in 27 s
+and one feature in 8 s; deploy + readiness are estimated at 1–2 minutes (not measured separately).
+A PR or `main` build therefore holds the lock for an **estimated 7–10 minutes**, most of it in the
+image build (whole builds: `main` #1 11.6 min, `PR-1` #1 19.9 min, earlier pipeline designs). Builds queue one after
+another: about 6 builds waiting at once reach the 60-minute lock wait and fail (a failed check
+blocks the merge: safe, but noisy). Auto-merge adds one `main` build per merged PR, and the strict
+up-to-date rule makes every other open PR re-validate after each merge, so N open PRs cost roughly
+N² / 2 builds when merged one by one.
+
+**Not changed, on purpose:** the image build stays inside the lock. It does not touch QA, but the
+lock was introduced because two pipelines building and testing ParaBank at once exhausted the lab's
+Docker VM (3.7 GiB) and every Smoke step timed out (`scripts/ci/host-lock.ts`). Moving it out would
+reintroduce that failure on this host.
+
+**Future scaling (not implemented):**
+
+1. Reuse the application image across PRs: the application is the pinned upstream commit, so a PR
+   that does not touch `docker/parabank/**` could deploy an image already built from the same
+   inputs (content-addressed tag, verified by revision label and image ID), cutting ~5 min from the
+   lock. `main` keeps building fresh for provenance. Needs a decision on the "build once per
+   pipeline" rule.
+2. A larger Docker VM, then a separate build lock (CPU/memory) and QA lock (environment).
+3. Ephemeral per-PR environments (one Compose project per PR on its own port) with a capacity
+   limit; QA stays the shared integration environment for `main`.
+4. A merge queue (if the repository moves to an organization) instead of strict up-to-date, so
+   queued PRs are validated together once instead of re-validated after every merge.
 
 ## Configuration
 
@@ -370,6 +455,12 @@ image tag after a rejected approval), and host ports 8090 and 8091 free for QA a
    ruleset → Import a ruleset, or
    `gh api -X POST repos/vassilva/Automacao-ParaBank-Playwright/rulesets --input docs/github-ruleset-main.json`),
    then confirm on an open PR that the merge button is blocked while the `Jenkins` check is pending.
+   Minimum safe configuration (this file): target the default branch; **no bypass actors**; block
+   deletion and force-pushes; require a pull request (0 approvals: a single maintainer cannot approve
+   their own PR); require status checks **`Jenkins`** and **`continuous-integration/jenkins/pr-head`**,
+   both pinned to app 4991392, with "require branches to be up to date" on. Not used: merge queue
+   (organization repositories only), code-owner review (would block the only maintainer forever),
+   push rulesets restricting file paths (GitHub offers them for private and internal repositories).
 5. **GitHub repository settings** (only after the ruleset is active, so auto-merge can never merge
    an unvalidated PR):
    `gh api -X PATCH repos/vassilva/Automacao-ParaBank-Playwright -F allow_auto_merge=true -F allow_update_branch=true`
@@ -378,7 +469,9 @@ image tag after a rejected approval), and host ports 8090 and 8091 free for QA a
 6. **First runs:** push this branch and open a PR (Smoke + Impacted Tests) → enable auto-merge on
    that PR → GitHub merges after the check → MAIN: QA Regression → approve → UAT Smoke. Then the
    drills: `fail-qa-regression`, one rejected approval, and `fail-uat-smoke`; one superseding check
-   (two quick pushes to a PR: the older build ends ABORTED); finish with one normal MAIN build.
+   (two quick pushes to a PR: the older build ends ABORTED, its check "cancelled", never "skipped");
+   finish with one normal MAIN build. The very first PR (this branch) changes the Jenkinsfile, so it
+   is a GATE-DEFINING change: merge it **manually**, without auto-merge.
 
 ## Validation status
 
@@ -386,15 +479,20 @@ image tag after a rejected approval), and host ports 8090 and 8091 free for QA a
 built once, QA Smoke 4/4, same image ID promoted to UAT, UAT Smoke 4/4, UAT Regression 24/24) and
 `PR-1` #1 SUCCESS (QA Smoke 4/4, QA Regression 24/24, no UAT stage), 2026-10-07.
 
-**Not yet executed in Jenkins:** the current design (role validation; PR Smoke + Impacted Tests;
-auto-merge; main QA Regression → approval → UAT Smoke), the approval, the milestones and the head
-check, the config check, the test-data audit gate, both gate drills and the log redaction.
+**Not yet executed in Jenkins:** the current design (role validation; PR Config Check + Smoke +
+Impacted Tests + Validation Complete; auto-merge; main QA Regression → approval → UAT Smoke), the
+approval, the milestones and head checks, the NOT_BUILT/UNSTABLE conversions, the config check, the
+test-data audit gate, both gate drills and the log redaction.
 
 **Checked locally:** static checks; Groovy parse; the stage-path simulation above; the milestone
 superseding rules, modelled on the plugin's decoded cancel logic (older waiting build aborted by a
 newer approval request; approved build not interrupted; older build aborted when a newer one asked
-or was approved first; older PR build aborted by a newer one); the impact map on 18 sample change
-sets; `ci:impacted run` against the local QA environment from a throwaway worktree: Regression path
+or was approved first); the result → GitHub mapping read from the installed checks-api and
+github-branch-source plugins; the declarative post conditions `unstable` and `notBuilt` exist in
+the installed pipeline-model-definition; fault injection on the simulation (each required PR or push
+stage forced to skip → FAILURE, never SUCCESS); the host-lock primitive under 60 concurrent creates;
+the impact map on 33 sample change sets (including configurator files, CI/CD tooling and a rename);
+`--no-renames` on a real rename; `ci:impacted run` against the local QA environment from a throwaway worktree: Regression path
 24/24, single-feature path 4/4 (`transfer-funds.feature`, known defects excluded), a known-defect-only
 selection (no gate), and a missing base (fails closed); `ci:config-check` on QA and UAT; the log
 redaction on real container logs and a real ParaBank build.

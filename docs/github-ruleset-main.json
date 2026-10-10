@@ -27,7 +27,10 @@
       "parameters": {
         "strict_required_status_checks_policy": true,
         "do_not_enforce_on_create": false,
-        "required_status_checks": [{ "context": "Jenkins", "integration_id": 4991392 }]
+        "required_status_checks": [
+          { "context": "Jenkins", "integration_id": 4991392 },
+          { "context": "continuous-integration/jenkins/pr-head", "integration_id": 4991392 }
+        ]
       }
     }
   ]
