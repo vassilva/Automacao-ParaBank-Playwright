@@ -175,17 +175,23 @@ auto-merged (see the auto-merge policy).
   and report redaction, runner configuration and dependencies, the Playwright adapter, the CI agent
   image, lint/format configs, `.github/**`, the ruleset file). Such a PR is judged by the very
   checks it modifies, so it is reviewed and merged manually.
-  **Enforcement:** the console line `GATE-DEFINING CHANGE` alone prevents nothing. The enforcement
-  is `.github/workflows/gate-guard.yml`: a `pull_request_target` workflow, which GitHub always
-  runs from `main` (a PR cannot change the guard or its list until it is merged). On every PR
-  event, including "auto-merge enabled", it reads the PR's changed paths (old and new paths of
-  renames) and, if one matches `main`'s list, turns auto-merge off and comments why. It never
-  checks out or runs PR code. It is not a required check, so a human can still merge manually.
-  Limits: it acts only after it is on `main` and GitHub Actions is enabled; it reacts within
-  seconds, so enabling auto-merge on a PR whose checks have **already** passed merges at once,
-  which is a deliberate human merge rather than an unattended one; it has not run on GitHub yet.
-  Merge queues and push rulesets (file-path restrictions) are not available for this
-  user-owned public repository, and code-owner review would block the only maintainer.
+  **Enforcement (preventive):** the console line `GATE-DEFINING CHANGE` alone prevents nothing.
+  `.github/workflows/gate-guard.yml` is a `pull_request_target` workflow, which GitHub always runs
+  from `main` (a PR cannot change the guard or its list until it is merged); it never checks out
+  or runs PR code. On every PR event it reads the PR's changed paths (old and new paths of renames)
+  and sets the commit status **`gate-review`** on the PR head: _success_ when no gate-defining
+  file changed, or when a human added the label **`gate-change-reviewed`**; _failure_ otherwise.
+  Every new commit removes the label, and a commit has no status until the guard ran. With
+  `gate-review` required by the ruleset (added once the guard is on `main`), GitHub refuses
+  **any** merge, automatic or manual, of an unreviewed gate-defining PR; there is no race with
+  auto-merge. While such a PR is unreviewed the guard also turns auto-merge off and comments.
+  Residual limits: a reviewed gate-defining PR can still be auto-merged if someone enables it
+  after reviewing (a deliberate human decision); anyone with write access can add the label, or
+  write a workflow that posts a `gate-review` status (rulesets pin a status to an app, and every
+  workflow uses the same `github-actions` app), so this protects against unattended merges, not
+  against a malicious maintainer. Merge queues and push rulesets (file-path restrictions) are
+  not available for this user-owned public repository, and code-owner review would block the
+  only maintainer.
   GitHub then merges an
   eligible PR only when every ruleset rule is satisfied: the `Jenkins` check and the `pr-head`
   status passed on an up-to-date head. A missing, pending, failing, cancelled or errored signal
