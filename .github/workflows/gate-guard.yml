@@ -1,22 +1,21 @@
 name: Gate-defining change guard
 
-# Enforces the merge policy for gate-defining changes (docs/ci-cd.md): a PR that changes a file
-# listed in .github/gate-defining-paths.json is judged by the very checks it modifies (Jenkins runs
-# the PR's own Jenkinsfile), so a human must review it before it can merge.
+# Sets the required commit status "gate-review" on every PR head (decision:
+# .github/scripts/gate-review.mjs). For a PR that changes a gate-defining file
+# (.github/gate-defining-paths.json) it is "success" only after a human review (label
+# gate-change-reviewed), after Jenkins passed on that exact commit, and while auto-merge is OFF;
+# it is "failure" whenever auto-merge is enabled. Auto-merge therefore never merges a
+# gate-defining PR: a human does. Ordinary PRs get "success" and may use auto-merge, still gated
+# by the Jenkins checks.
 #
-# PREVENTIVE: on every PR head commit this job sets the commit status "gate-review", which the main
-# ruleset requires:
-#   - success: no gate-defining file changed, or a human added the label "gate-change-reviewed";
-#   - failure: a gate-defining file changed and the label is absent.
-# A new commit has no status until this job runs (merge blocked), and the job removes the label on
-# every new commit, so a review covers exactly the commits it saw. Auto-merge of a gate-defining
-# PR without review is therefore impossible, not merely undone afterwards.
-# REACTIVE (courtesy): while such a PR is unreviewed, auto-merge is also turned off with a comment.
+# Why a required status and not "disable auto-merge": the workflow token cannot disable
+# auto-merge without contents: write ("Resource not accessible by integration
+# (disablePullRequestAutoMerge)"), and granting write access to code to a pull_request_target
+# workflow is not worth it. The status blocks the merge on GitHub's side (fail closed).
 #
-# Trusted by construction: pull_request_target runs THIS file and the pattern list from main, never
-# from the PR. The job never checks out, installs or runs PR code; it reads the PR's file list and
-# labels from the API as data. A PR that edits this workflow or the list changes nothing until it
-# is merged (and both files are gate-defining themselves).
+# Trusted by construction: pull_request_target and status workflows run THIS file and the scripts
+# it reads from main, never from the PR. Nothing from the PR is checked out or executed; file
+# lists, labels and statuses are read from the API as data.
 on:
   pull_request_target:
     branches: [main]
@@ -30,7 +29,11 @@ on:
         labeled,
         unlabeled,
         auto_merge_enabled,
+        auto_merge_disabled,
       ]
+  # Jenkins posts continuous-integration/jenkins/pr-head when a PR build starts and finishes: the
+  # status is re-evaluated so that it becomes "success" only after Jenkins passed.
+  status:
 
 permissions:
   contents: read
@@ -38,106 +41,98 @@ permissions:
   statuses: write
 
 concurrency:
-  group: gate-guard-${{ github.event.pull_request.number }}
+  group: gate-guard-${{ github.event.pull_request.number || github.event.sha }}
   cancel-in-progress: false
 
 env:
   REVIEW_LABEL: gate-change-reviewed
+  JENKINS_APP_ID: '4991392'
+  JENKINS_STATUS: continuous-integration/jenkins/pr-head
 
 jobs:
   guard:
     name: Gate-defining change guard
+    if: github.event_name != 'status' || github.event.context == 'continuous-integration/jenkins/pr-head'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # The base branch (main): only the pattern list is needed.
+      # The base branch (main): the pattern list and the decision script only.
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: .github/gate-defining-paths.json
+          sparse-checkout: |
+            .github/gate-defining-paths.json
+            .github/scripts/gate-review.mjs
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
-      - name: List the PR's changed files (old and new paths of renames)
+      - name: Evaluate and set gate-review
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          EVENT_PR: ${{ github.event.pull_request.number }}
+          EVENT_SHA: ${{ github.event.pull_request.head.sha || github.event.sha }}
         run: |
           set -euo pipefail
-          gh api --paginate "repos/$REPO/pulls/$PR/files" \
-            --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed.txt"
-          echo "$(wc -l < "$RUNNER_TEMP/changed.txt") path(s) changed"
-
-      - name: Match against main's gate-defining list
-        id: match
-        run: |
-          set -euo pipefail
-          node -e '
-            const fs = require("fs");
-            const { patterns } = JSON.parse(fs.readFileSync(".github/gate-defining-paths.json", "utf8"));
-            const regexes = patterns.map((p) => new RegExp(p));
-            const files = fs.readFileSync(process.env.RUNNER_TEMP + "/changed.txt", "utf8").split("\n").filter(Boolean);
-            const hits = files.filter((f) => regexes.some((r) => r.test(f)));
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, "gate=" + (hits.length > 0) + "\n");
-            console.log(hits.length ? "Gate-defining: " + hits.join(", ") : "No gate-defining file changed.");
-          '
-
-      - name: A new commit needs a new review
-        if: steps.match.outputs.gate == 'true' && github.event.action == 'synchronize'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          if gh api -X DELETE "repos/$REPO/issues/$PR/labels/$REVIEW_LABEL" >/dev/null 2>&1; then
-            echo "Removed $REVIEW_LABEL: the new commit has not been reviewed."
-          fi
-
-      - name: Set the gate-review status on the PR head
-        id: status
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          SHA: ${{ github.event.pull_request.head.sha }}
-          GATE: ${{ steps.match.outputs.gate }}
-        run: |
-          set -euo pipefail
-          # Current labels from the API (the event payload may predate the removal above).
-          reviewed=$(gh api "repos/$REPO/issues/$PR/labels" --jq "any(.[]; .name == \"$REVIEW_LABEL\")")
-          if [ "$GATE" != "true" ]; then
-            state=success; description="No gate-defining file changed"
-          elif [ "$reviewed" = "true" ]; then
-            state=success; description="Gate-defining change reviewed ($REVIEW_LABEL)"
+          # PRs to evaluate: the event's PR, or the open PRs to main whose head is the status' commit.
+          if [ "$EVENT" = "status" ]; then
+            prs=$(gh api "repos/$REPO/commits/$EVENT_SHA/pulls" \
+              --jq '[.[] | select(.state=="open" and .base.ref=="main" and .head.sha=="'"$EVENT_SHA"'") | .number] | join(" ")')
           else
-            state=failure; description="Gate-defining change: needs human review (label $REVIEW_LABEL)"
+            prs="$EVENT_PR"
           fi
-          gh api -X POST "repos/$REPO/statuses/$SHA" -f state="$state" -f context=gate-review \
-            -f description="$description" >/dev/null
-          echo "gate-review = $state on $SHA: $description"
-          echo "state=$state" >> "$GITHUB_OUTPUT"
+          [ -n "$prs" ] || { echo "No open PR to main has head $EVENT_SHA."; exit 0; }
 
-      - name: Turn auto-merge off on an unreviewed gate-defining PR
-        if: steps.match.outputs.gate == 'true' && steps.status.outputs.state == 'failure'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          echo "::warning::This PR changes gate-defining files; a human must review it (label $REVIEW_LABEL)."
-          enabled=$(gh pr view "$PR" -R "$REPO" --json autoMergeRequest --jq '.autoMergeRequest != null')
-          if [ "$enabled" = "true" ]; then
-            gh pr merge "$PR" -R "$REPO" --disable-auto
-            {
-              echo "Auto-merge was turned off: this PR changes gate-defining files"
-              echo "(\`.github/gate-defining-paths.json\` on main) and has not been reviewed."
-              echo "The required \`gate-review\` status stays failing until a human reviews the"
-              echo "change and adds the label \`$REVIEW_LABEL\`. See docs/ci-cd.md."
-            } > "$RUNNER_TEMP/comment.md"
-            gh pr comment "$PR" -R "$REPO" --body-file "$RUNNER_TEMP/comment.md"
-            echo "Auto-merge disabled."
-          else
-            echo "Auto-merge is not enabled; nothing to do."
-          fi
+          for pr in $prs; do
+            sha="$EVENT_SHA"
+            # Fail closed: any error below posts "failure" for this commit.
+            trap 'gh api -X POST "repos/$REPO/statuses/$sha" -f state=failure -f context=gate-review -f description="Guard could not evaluate this PR; blocked (fail closed)" >/dev/null || true' ERR
+
+            gh api --paginate "repos/$REPO/pulls/$pr/files" \
+              --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed.txt"
+            gate=$(node -e '
+              const fs = require("fs");
+              const { patterns } = JSON.parse(fs.readFileSync(".github/gate-defining-paths.json", "utf8"));
+              const files = fs.readFileSync(process.env.RUNNER_TEMP + "/changed.txt", "utf8").split("\n").filter(Boolean);
+              import("./.github/scripts/gate-review.mjs").then((m) => {
+                const hits = m.gateDefiningPaths(patterns, files);
+                console.error(hits.length ? "Gate-defining: " + hits.join(", ") : "No gate-defining file changed.");
+                console.log(hits.length > 0);
+              });
+            ')
+
+            # A new commit needs a new review.
+            if [ "$gate" = "true" ] && [ "$ACTION" = "synchronize" ]; then
+              if gh api -X DELETE "repos/$REPO/issues/$pr/labels/$REVIEW_LABEL" >/dev/null 2>&1; then
+                echo "Removed $REVIEW_LABEL: the new commit has not been reviewed."
+              fi
+            fi
+
+            reviewed=$(gh api "repos/$REPO/issues/$pr/labels" --jq "any(.[]; .name == \"$REVIEW_LABEL\")")
+            auto=$(gh pr view "$pr" -R "$REPO" --json autoMergeRequest --jq '.autoMergeRequest != null')
+            status_ok=$(gh api "repos/$REPO/commits/$sha/status" \
+              --jq "any(.statuses[]; .context == \"$JENKINS_STATUS\" and .state == \"success\")")
+            check_ok=$(gh api "repos/$REPO/commits/$sha/check-runs?check_name=Jenkins&filter=latest&app_id=$JENKINS_APP_ID" \
+              --jq '(.check_runs | sort_by(.started_at) | last | .conclusion) == "success"')
+            jenkins=false; [ "$status_ok" = "true" ] && [ "$check_ok" = "true" ] && jenkins=true
+
+            input=$(printf '{"gateDefining":%s,"reviewed":%s,"autoMergeEnabled":%s,"jenkinsPassed":%s}' \
+              "$gate" "$reviewed" "$auto" "$jenkins")
+            decision=$(node .github/scripts/gate-review.mjs "$input")
+            state=${decision%%$'\t'*}; description=${decision#*$'\t'}
+            gh api -X POST "repos/$REPO/statuses/$sha" -f state="$state" -f context=gate-review \
+              -f description="$description" >/dev/null
+            echo "PR #$pr $sha: gate=$gate reviewed=$reviewed autoMerge=$auto jenkins=$jenkins -> gate-review=$state ($description)"
+
+            if [ "$gate" = "true" ] && [ "$auto" = "true" ] && [ "$ACTION" = "auto_merge_enabled" ]; then
+              {
+                echo "Auto-merge is not allowed on this PR: it changes gate-defining files."
+                echo "The required \`gate-review\` status stays failing while auto-merge is enabled."
+                echo "Disable auto-merge; after review (label \`$REVIEW_LABEL\`) and a passing Jenkins"
+                echo "check, merge it manually. See docs/ci-cd.md."
+              } > "$RUNNER_TEMP/comment.md"
+              gh pr comment "$pr" -R "$REPO" --body-file "$RUNNER_TEMP/comment.md" >/dev/null
+            fi
+            trap - ERR
+          done

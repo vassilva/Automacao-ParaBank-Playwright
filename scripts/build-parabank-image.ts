@@ -18,6 +18,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { DIGEST_LABEL, inputsDigest } from './ci/app-image';
 import { lineRedactor } from './log-redaction';
 
 const CONTEXT = path.join('docker', 'parabank');
@@ -109,6 +110,10 @@ async function main(): Promise<void> {
       `PARABANK_SOURCE_REPO=${repo}`,
       '--build-arg',
       `PARABANK_SOURCE_COMMIT=${commit}`,
+      // The application inputs this image was built from (scripts/ci/app-image.ts): lets a later
+      // pipeline reuse it instead of rebuilding when only tests or documentation changed.
+      '--label',
+      `${DIGEST_LABEL}=${inputsDigest()}`,
       '--tag',
       tag,
       ...(fresh ? ['--no-cache-filter', 'build'] : []),

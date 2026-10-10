@@ -1,29 +1,37 @@
 # CI/CD: role validation, PR checks, auto-merge, QA Regression, approval, UAT Smoke
 
-One `Jenkinsfile`, one **Multibranch Pipeline**. Every build that deploys creates the ParaBank image
-exactly once and the environments run that image by ID. The target flow is:
+One `Jenkinsfile`, one **Multibranch Pipeline**. The ParaBank application image is a function of
+its build inputs only (see "Application image"); test and documentation changes reuse the image QA
+already runs instead of rebuilding or redeploying it. The flow is:
 
 ```
-Developer / QA / Configurator ─> push ─> role-specific validation ─> Pull Request
-  ─> Quality Gates + QA Smoke (4) + QA Impacted Tests  (= the required "Jenkins" check)
-  ─> GitHub auto-merge (enabled per eligible PR, merges only after the check passed)
-  ─> main: automatic QA deployment ─> QA Regression (24) ─> mandatory manual Jenkins approval
-  ─> UAT deployment (same image ID) ─> UAT Smoke (4)
+QA engineer: tests written and run locally against QA ─> push to a feature branch ─> Pull Request
+  ─> PRE-MERGE: Quality Gates + QA Smoke (4) on QA  (+ feature-level impacted tests)
+     = the required "Jenkins" check + "pr-head" status; failures block the merge
+  ─> merge: GitHub auto-merge for eligible PRs; a human merge for gate-defining PRs
+  ─> POST-MERGE (main): QA Regression (24) on QA, ONCE, the pre-UAT gate
+  ─> mandatory manual approval (viamerico) ─> UAT deployment of the same image ID ─> UAT Smoke (4)
 ```
 
 ```
 PUSH, by branch prefix (a branch with an open PR is built as the PR only):
-  feature/*, others  DEVELOPER     QUALITY GATES ─> BUILD IMAGE ─> DEPLOY QA ─> QA READY ─> QA SMOKE (4)
-  qa/*               QA            QUALITY GATES ─> BUILD IMAGE ─> DEPLOY QA ─> QA READY ─> QA IMPACTED TESTS
+  feature/*, others  DEVELOPER     QUALITY GATES ─> APP IMAGE ─> QA READY ─> QA SMOKE (4)
+  qa/*               QA            QUALITY GATES ─> APP IMAGE ─> QA READY ─> QA IMPACTED TESTS
   config/*           CONFIGURATOR  QUALITY GATES ─> CONFIG CHECK          (no image, no deployment, no lock)
 
-PULL REQUEST (CI)  QUALITY GATES ─> BUILD IMAGE ─> DEPLOY QA ─> QA READY ─> QA SMOKE (4) ─> QA IMPACTED TESTS
-                   = the "Jenkins" check GitHub requires before a merge or an auto-merge
+PULL REQUEST (CI)  QUALITY GATES ─> CONFIG CHECK ─> APP IMAGE ─> QA READY ─> QA SMOKE (4)
+                     ─> QA IMPACTED TESTS (feature level only; a Regression-level selection is
+                        deferred to main) ─> QA GATE ─> VALIDATION COMPLETE
+                   = the "Jenkins" check GitHub requires before any merge. No Regression, no UAT.
 
-MAIN (CD)          QUALITY GATES ─> BUILD IMAGE ─> DEPLOY QA ─> QA READY ─> QA REGRESSION (24)
-                     ─> UAT APPROVAL (input; authorized approver; timeout; supersedes older waiting builds)
-                     ─> VERIFY APPROVED IMAGE (still main's head) ─> PROMOTE SAME IMAGE ID ─> UAT READY
-                     ─> UAT SMOKE (4) [─> KNOWN DEFECTS (optional, never gating)] ─> DEPLOYMENT RECORD
+MAIN (CD)          QUALITY GATES ─> APP IMAGE ─> QA READY ─> QA REGRESSION (24, once)
+                     ─> UAT APPROVAL (input; viamerico; timeout; supersedes older waiting builds)
+                     ─> VERIFY APPROVED IMAGE (still main's head, same ID, revision, inputs digest)
+                     ─> PROMOTE SAME IMAGE ID (no rebuild) ─> UAT READY ─> UAT SMOKE (4)
+                     [─> KNOWN DEFECTS (optional, never gating)] ─> DEPLOYMENT RECORD
+
+APP IMAGE = RESOLVE (under the host lock) ─> [BUILD, only if no image from these inputs exists]
+            ─> VERIFY (pinned revision + inputs digest) ─> [DEPLOY QA, only if QA runs another image]
 ```
 
 ```
@@ -43,8 +51,9 @@ PROMOTE ─> UAT READY ─> UAT SMOKE ──fail──> FAILURE (no deployment r
                          SUCCESS
 ```
 
-A Pull Request never deploys to UAT. The main pipeline runs no QA Smoke and no UAT Regression; it
-is SUCCESS only if UAT Smoke and its count check pass. Auto-merge changes only **who clicks merge**
+A Pull Request never runs the Regression suite and never deploys to UAT. The main pipeline runs
+QA Regression exactly once per promotion attempt, no QA Smoke and no UAT Regression; it is SUCCESS
+only if UAT Smoke and its count check pass. Auto-merge changes only **who clicks merge**
 (GitHub, once the required check passed): every gate after the merge is unchanged, and nothing
 reaches UAT without the manual Jenkins approval.
 
@@ -101,6 +110,11 @@ PR checkouts fetch only the PR ref, so the script fetches the target branch anon
 | any gate-defining file (`.github/gate-defining-paths.json`, incl. `.github/**`, lint/format configs, the ruleset file)                                                                                                                                                         | **Regression (24)**             |
 | documentation (`docs/**`, `*.md`), `.gitignore`, `.env.example` (never loaded in CI)                                                                                                                                                                                           | nothing beyond Smoke            |
 | anything the map does not know (e.g. a new page object)                                                                                                                                                                                                                        | **Regression (24)** (fail-safe) |
+
+**On pull requests the full Regression never runs:** a Regression-level selection (shared code,
+high-risk or gate-defining files) is recorded in `selection.json` and deferred to the post-merge QA
+Regression, which runs exactly once per promotion as the gate before UAT; feature-level selections
+still run on the PR. `qa/*` pushes run the selection in full.
 
 Known-defect scenarios are never selected (the `full` profile excludes them); a selection that
 contains only known defects runs nothing and does not gate. After the run, the coverage validator
@@ -175,29 +189,39 @@ auto-merged (see the auto-merge policy).
   and report redaction, runner configuration and dependencies, the Playwright adapter, the CI agent
   image, lint/format configs, `.github/**`, the ruleset file). Such a PR is judged by the very
   checks it modifies, so it is reviewed and merged manually.
-  **Enforcement (preventive):** the console line `GATE-DEFINING CHANGE` alone prevents nothing.
-  `.github/workflows/gate-guard.yml` is a `pull_request_target` workflow, which GitHub always runs
-  from `main` (a PR cannot change the guard or its list until it is merged); it never checks out
-  or runs PR code. On every PR event it reads the PR's changed paths (old and new paths of renames)
-  and sets the commit status **`gate-review`** on the PR head: _success_ when no gate-defining
-  file changed, or when a human added the label **`gate-change-reviewed`**; _failure_ otherwise.
-  Every new commit removes the label, and a commit has no status until the guard ran. With
-  `gate-review` required by the ruleset (added once the guard is on `main`), GitHub refuses
-  **any** merge, automatic or manual, of an unreviewed gate-defining PR; there is no race with
-  auto-merge. While such a PR is unreviewed the guard also turns auto-merge off and comments.
-  Residual limits: a reviewed gate-defining PR can still be auto-merged if someone enables it
-  after reviewing (a deliberate human decision); anyone with write access can add the label, or
-  write a workflow that posts a `gate-review` status (rulesets pin a status to an app, and every
-  workflow uses the same `github-actions` app), so this protects against unattended merges, not
-  against a malicious maintainer. Merge queues and push rulesets (file-path restrictions) are
-  not available for this user-owned public repository, and code-owner review would block the
-  only maintainer.
+  **Enforcement (preventive, fail closed):** `.github/workflows/gate-guard.yml` runs from `main`
+  (`pull_request_target`, and `status` when Jenkins reports `pr-head`; a PR cannot change it) and
+  sets the required status **`gate-review`** on the PR head with `.github/scripts/gate-review.mjs`:
+
+  | PR            | auto-merge                                         | review label | Jenkins on this commit | `gate-review`                          |
+  | ------------- | -------------------------------------------------- | ------------ | ---------------------- | -------------------------------------- |
+  | ordinary      | any                                                | –            | –                      | success (Jenkins checks still gate it) |
+  | gate-defining | **enabled**                                        | any          | any                    | **failure** (auto-merge not allowed)   |
+  | gate-defining | off                                                | absent       | any                    | failure (needs review)                 |
+  | gate-defining | off                                                | present      | not yet passed         | pending                                |
+  | gate-defining | off                                                | present      | passed                 | success: merge **manually**            |
+  | any           | guard cannot read the PR (API or permission error) |              |                        | failure (fail closed)                  |
+
+  Every new commit removes the label. Because `gate-review` turns success only as the last
+  required signal and only while auto-merge is off, auto-merge is never the action that merges a
+  gate-defining PR, and a label alone never makes it mergeable; GitHub does not allow enabling
+  auto-merge on a PR that is already mergeable, so the merge is a human one. **Why not simply turn
+  auto-merge off?** The workflow token cannot: GitHub answered "Resource not accessible by
+  integration (disablePullRequestAutoMerge)" because that mutation needs `contents: write`, which
+  this `pull_request_target` workflow deliberately does not get (write access to code is not worth
+  it for a guard). The required status is the boundary instead; the guard only comments.
+  Residual limits: anyone with write access can add the label or write a workflow that posts a
+  `gate-review` status (all workflows share the `github-actions` app), so this prevents unattended
+  merges, not a malicious maintainer; a Jenkins re-run on the same commit after the label could
+  reopen a window of seconds between auto-merge being enabled and the guard reacting. Merge queues
+  and push rulesets are not available for this user-owned repository.
   GitHub then merges an
   eligible PR only when every ruleset rule is satisfied: the `Jenkins` check and the `pr-head`
   status passed on an up-to-date head. A missing, pending, failing, cancelled or errored signal
   blocks the merge; a new push re-runs the check and the merge waits for it. GitHub
   disables auto-merge itself if someone without write access pushes to the PR branch or the base
   branch is changed. `gh pr merge <n> --disable-auto` cancels it.
+
 - **Jenkins job:** Multibranch Pipeline `Automacao-ParaBank-Playwright` (GitHub Branch Source,
   credential `github-app-qa-automation`), created in the Jenkins UI as a copy of the ServeRest job.
   Discovery: branches excluding those filed as PRs; PRs from the repository itself at the PR head
@@ -319,6 +343,26 @@ promoted from `main`. Both are defined once in `src/support/environments.ts` and
 `scripts/environment.ts` (`npm run qa:deploy|start|stop|status|health`, the same for `uat:`, and
 `npm run env:identity`). The same tests target either one by configuration only (`TARGET_ENV`);
 Jenkins also sets `PARABANK_BASE_URL` to the container address.
+
+## Application image: reuse, deploy or build (explicit, deterministic)
+
+This repository is mostly test automation. The ParaBank image is a function of its **build inputs**
+only: `docker/parabank/**` (Dockerfile, pinned source commit) and `scripts/build-parabank-image.ts`.
+Their SHA-256 is the **inputs digest**, recorded on every image built by this project (label
+`parabank.inputs.digest`). Under the host lock, "Resolve Application Image"
+(`scripts/ci/app-image.ts`) decides:
+
+| Action | When                                                                       | Effect                                                                  |
+| ------ | -------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| REUSE  | QA runs, is healthy, and its image has this digest and the pinned revision | no build, no deployment; QA is re-verified (health, database, identity) |
+| DEPLOY | an image with this digest exists, but QA runs another one or is unhealthy  | deploy it to QA, no build                                               |
+| BUILD  | no image with this digest exists (e.g. the application version changed)    | build once, deploy                                                      |
+
+Images without the label (built before it existed) are never reused. Whatever the action, "Verify
+Application Image" checks the pinned revision and the digest, QA Ready checks that QA runs exactly
+that image ID, and on `main` that same ID is the only one QA Regression validates and the approval
+can promote (Verify Approved Image checks ID, revision and digest again). A test-only or
+documentation change therefore never promotes a different or unvalidated application version.
 
 ## Build once, promote the same image
 

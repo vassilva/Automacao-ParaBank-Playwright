@@ -286,6 +286,7 @@ pipeline {
               npm run typecheck
               npm run test:dry-run
               npm run -s audit:test-data
+              npm run -s test:ci
               npm run -s ci:bdd -- --total "$TOTAL_SCENARIOS_EXPECTED" --known-defects "$KNOWN_DEFECTS_EXPECTED"
               npm run -s ci:coverage -- --suite smoke --expect "$SMOKE_EXPECTED"
               npm run -s ci:coverage -- --suite regression --expect "$REGRESSION_EXPECTED"
@@ -323,27 +324,87 @@ pipeline {
           }
         }
 
-        // BUILD ONCE: the only image build of the pipeline. QA and UAT receive this image ID.
-        stage('Build Image') {
+        // APPLICATION IMAGE, decided explicitly (scripts/ci/app-image.ts): the image is a function of
+        // the application build inputs (docker/parabank/**, the build script), recorded on every
+        // image as label parabank.inputs.digest. Test or documentation changes do not change it:
+        //   REUSE   QA already runs a healthy image from these inputs -> no build, no deployment
+        //   DEPLOY  such an image exists locally but QA runs another one -> deploy it, no build
+        //   BUILD   none exists -> build once, then deploy
+        // Under the host lock, so QA cannot change between this decision and the validation.
+        stage('Resolve Application Image') {
           when {
             expression { env.DEPLOYS_QA == 'true' }
           }
           steps {
             script {
+              def out = sh(returnStdout: true, script: 'npm run -s ci:app-image -- resolve').trim()
+              def kv = [:]
+              out.split('\n').each { line ->
+                def i = line.indexOf('=')
+                if (i > 0) { kv[line.substring(0, i)] = line.substring(i + 1) }
+              }
+              env.APP_IMAGE_ACTION = kv.APP_IMAGE_ACTION ?: ''
+              env.APP_INPUTS_DIGEST = kv.APP_INPUTS_DIGEST ?: ''
+              if (!(env.APP_IMAGE_ACTION == 'REUSE' || env.APP_IMAGE_ACTION == 'DEPLOY' || env.APP_IMAGE_ACTION == 'BUILD') ||!(env.APP_INPUTS_DIGEST ==~ /sha256:[0-9a-f]{64}/)) {
+                error("Could not decide the application image: ${out}")
+              }
+              if (env.APP_IMAGE_ACTION != 'BUILD') {
+                env.IMAGE_ID = kv.APP_IMAGE_ID ?: ''
+                if (!(env.IMAGE_ID ==~ /sha256:[0-9a-f]{64}/)) {
+                  error("Resolver chose ${env.APP_IMAGE_ACTION} without a usable image ID: '${env.IMAGE_ID}'")
+                }
+                // The build tag keeps a reference to the image for this pipeline (removed in post).
+                sh 'docker tag "$IMAGE_ID" "$IMAGE_TAG"'
+              }
+              banner('APPLICATION IMAGE DECISION', [
+                'ACTION'       : env.APP_IMAGE_ACTION,
+                'REASON'       : kv.APP_IMAGE_REASON,
+                'INPUTS DIGEST': env.APP_INPUTS_DIGEST,
+                'IMAGE ID'     : env.IMAGE_ID ?: '(to be built)',
+              ])
+            }
+          }
+        }
+
+        // BUILD ONCE, only when no image from these application inputs exists. QA and UAT receive
+        // this image ID.
+        stage('Build Image') {
+          when {
+            expression { env.DEPLOYS_QA == 'true' && env.APP_IMAGE_ACTION == 'BUILD' }
+          }
+          steps {
+            script {
               sh 'PARABANK_IMAGE_TAG="$IMAGE_TAG" PARABANK_BUILD_FRESH=true npm run app:build'
               env.IMAGE_ID = sh(returnStdout: true, script: 'docker image inspect --format "{{.Id}}" "$IMAGE_TAG"').trim()
-              env.IMAGE_REVISION = sh(returnStdout: true, script: 'docker image inspect --format "{{index .Config.Labels \\"org.opencontainers.image.revision\\"}}" "$IMAGE_TAG"').trim()
-              env.SOURCE_COMMIT = sh(returnStdout: true, script: "sed -n 's/^PARABANK_SOURCE_COMMIT=//p' docker/parabank/source.env").trim()
-              env.SOURCE_REPO = sh(returnStdout: true, script: "sed -n 's/^PARABANK_SOURCE_REPO=//p' docker/parabank/source.env").trim()
               if (!(env.IMAGE_ID ==~ /sha256:[0-9a-f]{64}/)) {
                 error("Build produced no usable image ID: '${env.IMAGE_ID}'")
               }
+            }
+          }
+        }
+
+        // Whatever the action, the image must come from the pinned commit and these inputs.
+        stage('Verify Application Image') {
+          when {
+            expression { env.DEPLOYS_QA == 'true' }
+          }
+          steps {
+            script {
+              env.IMAGE_REVISION = sh(returnStdout: true, script: 'docker image inspect --format "{{index .Config.Labels \\"org.opencontainers.image.revision\\"}}" "$IMAGE_ID"').trim()
+              def imageDigest = sh(returnStdout: true, script: 'docker image inspect --format "{{index .Config.Labels \\"parabank.inputs.digest\\"}}" "$IMAGE_ID"').trim()
+              env.SOURCE_COMMIT = sh(returnStdout: true, script: "sed -n 's/^PARABANK_SOURCE_COMMIT=//p' docker/parabank/source.env").trim()
+              env.SOURCE_REPO = sh(returnStdout: true, script: "sed -n 's/^PARABANK_SOURCE_REPO=//p' docker/parabank/source.env").trim()
               if (env.IMAGE_REVISION != env.SOURCE_COMMIT) {
                 error("Image revision label ${env.IMAGE_REVISION} does not match the pinned source commit ${env.SOURCE_COMMIT}")
               }
-              banner('APPLICATION BUILD (BUILD ONCE)', [
+              if (imageDigest != env.APP_INPUTS_DIGEST) {
+                error("Image inputs digest ${imageDigest} does not match this commit's application inputs ${env.APP_INPUTS_DIGEST}")
+              }
+              banner('APPLICATION IMAGE', [
+                'ACTION'       : env.APP_IMAGE_ACTION,
                 'SOURCE REPO'  : env.SOURCE_REPO,
                 'SOURCE COMMIT': env.SOURCE_COMMIT,
+                'INPUTS DIGEST': env.APP_INPUTS_DIGEST,
                 'IMAGE TAG'    : env.IMAGE_TAG,
                 'IMAGE ID'     : env.IMAGE_ID,
               ])
@@ -353,13 +414,11 @@ pipeline {
 
         stage('Deploy QA') {
           when {
-            expression { env.DEPLOYS_QA == 'true' }
+            expression { env.DEPLOYS_QA == 'true' && (env.APP_IMAGE_ACTION == 'BUILD' || env.APP_IMAGE_ACTION == 'DEPLOY') }
           }
           steps {
             script {
               sh 'npm run -s env -- deploy qa "$IMAGE_ID"'
-              env.QA_IMAGE_ID = sh(returnStdout: true, script: 'docker container inspect --format "{{.Image}}" parabank-qa-parabank-1').trim()
-              banner('QA DEPLOYED', ['PROJECT': 'parabank-qa', 'IMAGE ID': env.QA_IMAGE_ID])
             }
           }
         }
@@ -369,8 +428,13 @@ pipeline {
             expression { env.DEPLOYS_QA == 'true' }
           }
           steps {
-            sh 'npm run -s env -- health qa --wait'
-            sh 'npm run -s env -- identity qa --expect "$IMAGE_ID"'
+            script {
+              // Deployed or reused, QA must be healthy and run exactly this image.
+              sh 'npm run -s env -- health qa --wait'
+              sh 'npm run -s env -- identity qa --expect "$IMAGE_ID"'
+              env.QA_IMAGE_ID = sh(returnStdout: true, script: 'docker container inspect --format "{{.Image}}" parabank-qa-parabank-1').trim()
+              banner('QA READY', ['PROJECT': 'parabank-qa', 'IMAGE ID': env.QA_IMAGE_ID, 'ACTION': env.APP_IMAGE_ACTION])
+            }
           }
         }
 
@@ -401,6 +465,9 @@ pipeline {
             withEnv([
               'TARGET_ENV=qa',
               'PARABANK_BASE_URL=http://parabank-qa-parabank-1:8080/parabank/',
+              // Pull requests never run the full Regression: it runs once, after the merge, as
+              // the pre-UAT gate. Feature-level selections still run here.
+              "IMPACTED_SCOPE=${env.BUILD_MODE == 'PULL REQUEST' ? 'features' : 'all'}",
             ]) {
               sh 'npm run -s ci:impacted -- run'
             }
@@ -651,6 +718,8 @@ pipeline {
               docker image inspect "$IMAGE_ID" >/dev/null
               revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_ID")
               test "$revision" = "$SOURCE_COMMIT"
+              digest=$(docker image inspect --format '{{index .Config.Labels "parabank.inputs.digest"}}' "$IMAGE_ID")
+              test "$digest" = "$APP_INPUTS_DIGEST"
               echo "Approved image $IMAGE_ID (revision $revision), validated by QA Regression, approved by $UAT_APPROVER"
             '''
           }
