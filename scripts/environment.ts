@@ -112,20 +112,27 @@ function deploy(environment: EnvironmentName, imageId: string): void {
   if (!IMAGE_ID.test(imageId)) {
     throw new Error(`deploy needs a full image ID (sha256:<64 hex>), got "${imageId}"`);
   }
-  const { network, container } = names(environment);
   console.log(`Deploying image ${imageId} to ${environment.toUpperCase()} (fresh container)`);
   docker(
     ['compose', 'up', '--detach', '--wait', '--wait-timeout', '180', '--force-recreate'],
     composeEnv(environment, imageId),
   );
-  if (inContainer) {
-    const attached = docker(['network', 'inspect', network, '--format', '{{json .Containers}}']);
-    if (!attached.includes(hostname())) docker(['network', 'connect', network, hostname()]);
-    console.log(`Agent attached to ${network}; ParaBank at http://${container}:8080/parabank/`);
-  }
   // A deployment is complete only when the environment is usable (database initialized).
   health(environment, true);
   identity(environment, imageId);
+}
+
+/**
+ * A containerized Jenkins agent reaches an environment through its Compose network. Idempotent;
+ * also used when a pipeline validates an environment it did not deploy (scripts/ci/app-image.ts).
+ */
+function attachAgent(environment: EnvironmentName): void {
+  if (!inContainer) return;
+  const { network, container } = names(environment);
+  if (!succeeds(['network', 'inspect', network])) return;
+  const attached = docker(['network', 'inspect', network, '--format', '{{json .Containers}}']);
+  if (!attached.includes(hostname())) docker(['network', 'connect', network, hostname()]);
+  console.log(`Agent attached to ${network}; ParaBank at http://${container}:8080/parabank/`);
 }
 
 /** Polls the container's own healthcheck (an observable condition), bounded by 180 s. */
@@ -171,6 +178,7 @@ function waitUntilDatabaseInitialized(environment: EnvironmentName): boolean {
 }
 
 function health(environment: EnvironmentName, wait: boolean): void {
+  attachAgent(environment);
   const current = wait ? waitUntilHealthy(environment) : status(environment);
   console.log(JSON.stringify(current));
   if (current.state !== 'running' || current.health !== 'healthy') {

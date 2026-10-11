@@ -33,6 +33,11 @@ export default tseslint.config(
     files: ['scripts/**/*.ts'],
     rules: { 'no-console': 'off' },
   },
+  {
+    // node:test registers suites with describe()/it(), which return promises the runner awaits.
+    files: ['scripts/ci/tests/**/*.ts'],
+    rules: { '@typescript-eslint/no-floating-promises': 'off' },
+  },
   { files: ['**/*.mjs'], extends: [tseslint.configs.disableTypeChecked] },
   prettier,
 );

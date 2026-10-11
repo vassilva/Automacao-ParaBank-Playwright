@@ -262,11 +262,25 @@ ${result.stderr || result.stdout}`);
   }
 }
 
+/** On a pull request (scope "features") a Regression-level selection waits for main. */
+export function deferredToMain(selection: Selection, scope: string | undefined): boolean {
+  return selection.kind === 'regression' && scope === 'features';
+}
+
 function run(selection: Selection): void {
   const environment = process.env.TARGET_ENV || 'qa';
   const reportsDir = path.join('reports', environment, 'impacted');
   mkdirSync(reportsDir, { recursive: true });
   writeFileSync(path.join(reportsDir, 'selection.json'), `${JSON.stringify(selection, null, 2)}\n`);
+  // Pull requests (IMPACTED_SCOPE=features) never run the full Regression: it runs exactly once per
+  // promotion, after the merge on main, as the gate before UAT. The selection is still recorded.
+  if (deferredToMain(selection, process.env.IMPACTED_SCOPE)) {
+    console.log(
+      'IMPACTED TESTS: this change calls for the Regression suite; on a pull request it is ' +
+        'deferred to the post-merge QA Regression (24), which gates the UAT deployment.',
+    );
+    return;
+  }
   if (selection.kind === 'none') {
     console.log('IMPACTED TESTS: none beyond Smoke (documentation, lint or ignore rules only).');
     return;
