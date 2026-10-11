@@ -1,0 +1,5 @@
+<?jelly escape-by-default='true'?>
+<div>
+  One ParaBank pipeline build RUNNING at a time: while a build of the ParaBank Multibranch project is
+  active, every other build of it stays in the Jenkins queue, without an executor.
+</div>

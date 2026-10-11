@@ -329,7 +329,7 @@ locator assertions, URLs, and the specific network responses each page action wa
 ## CI
 
 **Jenkins is the CI/CD** (Multibranch Pipeline, `Jenkinsfile`); see [docs/ci-cd.md](docs/ci-cd.md).
-One pipeline runs at a time (global lock); the application image is reused unless the application
+One pipeline runs at a time (the others wait in the Jenkins queue); the application image is reused unless the application
 itself changed, and UAT only ever receives the image QA Regression validated:
 
 | Event        | Test plan                                                                                                                                                                        |
