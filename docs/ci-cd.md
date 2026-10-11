@@ -297,6 +297,26 @@ the `WARNING` makes visible. An administrator can uninstall it. It is a private 
 repository (not from the Jenkins update center): it uses only long-stable core APIs
 (`QueueTaskDispatcher`, `Queue`, `Executor`, `Job`, `Run`), and is rebuilt only if those change.
 
+### Audit of the plugin (2026-10-11)
+
+| Area           | Result                                                                                                                                                                                                                                                                                                                              |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Attack surface | No HTTP endpoint, form, permission, credential, network access, script evaluation or file I/O of its own (only Jenkins' `Queue.save()`); runs inside the queue maintenance, on no user input                                                                                                                                        |
+| Dependencies   | Bundles nothing (the `.hpi` holds only its own jar: two classes); direct dependencies `jenkins-core` 2.541.2, `jakarta.servlet-api`, `commons-logging`, all `provided` by Jenkins. The build verifies every download's checksum (`mvn -C`)                                                                                          |
+| Compatibility  | Manifest `Jenkins-Version: 2.541.2` (the minimum; the real Jenkins is 2.541.2), bytecode Java 17 (the real Jenkins runs 17.0.18), no plugin dependency; core APIs stable for many years. After a Jenkins upgrade: run `npm run test:queue` with the new image before relying on it                                                  |
+| Concurrency    | `canRun` reads queue and executor snapshots; its own state is a synchronized set and an atomic flag; the queue save runs on Jenkins' timer, outside the queue lock, at most one at a time                                                                                                                                           |
+| Failure modes  | Check error: the ParaBank build stays queued (fail closed, reason shown). Plugin missing, disabled or the job renamed: builds are serialized by the fallback lock only, with the `WARNING`. A ParaBank build that started another ParaBank build and waited for it would wait until its timeout (the `Jenkinsfile` never does this) |
+| Exposure       | Queue reasons name the holding build (visible to logged-in users, as the queue already is); log line names the serialized project                                                                                                                                                                                                   |
+
+**Artifact:** the build is not byte-reproducible (jar timestamps), so record the SHA-256 of the exact
+`.hpi` you deploy (`sha256sum jenkins/parabank-serial-queue-plugin/target/parabank-serial-queue.hpi`);
+its classes are identical across rebuilds of the same source.
+
+**Evidence retention:** the job prunes removed branches, which deletes their build records; a
+branch job removed after its PR was opened takes its builds with it (seen with
+`ci/queue-level-serialization` #1, which `PR-8` #1 waited for). With the branch property such builds
+no longer start; `build-overlap.ts` judges the records that remain.
+
 ## Gates
 
 1. Stages run in sequence: a failing suite or count check fails its stage and the build; every
@@ -542,6 +562,12 @@ JavaScript, `…number:!0,password:!0`, not data.)
 4. **Optional:** enable "Automatically delete head branches" in GitHub (removes leftover branch
    jobs); delete the stale `feature/ci-jenkins-pipeline` branch; delete `main` #1 (unredacted
    synthetic data, see "Artifacts archived before the log-redaction fix").
+5. **Security updates (found 2026-10-11, independent of the pipeline):** Jenkins 2.541.2 is
+   affected by the core advisory of 2026-09-02 (high; fixed in LTS 2.568.3), and the installed
+   Script Security 1399 by the sandbox-bypass advisories of 2026-09-02 and 2026-09-16 (high; fixed in
+   1422); Pipeline: Multibranch 821 (low; fixed in 842) and Pipeline: Groovy Libraries 787 (medium;
+   fixed in 806) too. Upgrade them, then run `npm run test:queue` against the upgraded image before
+   relying on the serial-queue plugin again.
 
 ## Failure, rollback and recovery
 

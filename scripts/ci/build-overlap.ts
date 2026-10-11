@@ -28,33 +28,57 @@ export interface BuildRecord {
   blockedMs: number | null;
 }
 
-/** The last value of a top-level field (actions earlier in the file may reuse the element name). */
-function lastValue(xml: string, tag: string): string | null {
-  const matches = [...xml.matchAll(new RegExp(`<${tag}>([^<]*)</${tag}>`, 'g'))];
-  return matches.at(-1)?.[1] ?? null;
+/**
+ * The text of the root element's direct children (the run's own fields: timestamp, startTime,
+ * result, duration). Nested elements are skipped: a real record also holds, for example, the
+ * flow execution's own <result> (FAILURE for a run that ended ABORTED) after the run's <result>.
+ * XStream escapes "<" in text, so every "<" starts a tag.
+ */
+export function topLevelFields(xml: string): Map<string, string> {
+  const fields = new Map<string, string>();
+  let depth = 0;
+  let open: { name: string; from: number } | null = null;
+  for (const m of xml.matchAll(/<(\/?)([A-Za-z_][\w.$-]*)[^>]*?(\/?)>/g)) {
+    const [tag, closing, name = '', selfClosing] = m;
+    const at = m.index ?? 0;
+    if (closing) {
+      depth--;
+      if (depth === 1 && open !== null && open.name === name) {
+        if (!fields.has(name)) fields.set(name, xml.slice(open.from, at).trim());
+        open = null;
+      }
+    } else if (!selfClosing) {
+      depth++;
+      if (depth === 2) open = { name, from: at + tag.length };
+    }
+  }
+  return fields;
 }
 
 export function parseBuildXml(xml: string, job: string, number: number): BuildRecord | null {
-  const timestamp = Number(lastValue(xml, 'timestamp'));
+  const fields = topLevelFields(xml);
+  const timestamp = Number(fields.get('timestamp'));
   if (!Number.isFinite(timestamp) || timestamp <= 0) {
     return null;
   }
-  const startTime = Number(lastValue(xml, 'startTime') ?? timestamp);
-  const durationText = lastValue(xml, 'duration');
-  const result = lastValue(xml, 'result');
-  // A finished build has a result and a non-zero duration; anything else is still RUNNING.
+  const startTime = Number(fields.get('startTime') ?? timestamp);
+  const durationText = fields.get('duration') ?? null;
+  const result = fields.get('result') ?? null;
+  // A finished build has its own result and a non-zero duration; anything else is still RUNNING.
   const finished =
     result !== null && durationText !== null && Number(durationText) > 0
       ? startTime + Number(durationText)
       : null;
-  // The first TimeInQueueAction entry belongs to the build itself (later ones: its node blocks).
-  const blocked = /<blockedDurationMillis>(\d+)<\/blockedDurationMillis>/.exec(xml);
+  // The build's own queue time (metrics plugin); SubTaskTimeInQueueAction entries are its node blocks.
+  const blocked =
+    /<jenkins\.metrics\.impl\.TimeInQueueAction[\s>][\s\S]*?<blockedDurationMillis>(\d+)<\/blockedDurationMillis>/.exec(
+      xml,
+    );
   return {
     job,
     number,
     running: timestamp,
     finished,
-    // While RUNNING the top-level result is not written yet: any <result> found belongs to an action.
     result: finished === null ? null : result,
     blockedMs: blocked ? Number(blocked[1]) : null,
   };

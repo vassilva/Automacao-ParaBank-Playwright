@@ -61,6 +61,29 @@ describe('parseBuildXml()', () => {
     assert.equal(r?.result, null, "an action's result is not the build result");
   });
 
+  it('reads the run fields, not the nested flow execution (real record: ABORTED run, FAILURE execution)', () => {
+    const real =
+      "<?xml version='1.1' encoding='UTF-8'?>\n<flow-build plugin=\"workflow-job@1571\">\n  <actions>\n" +
+      '    <jenkins.metrics.impl.TimeInQueueAction plugin="metrics@4.2.37">\n' +
+      '      <blockedDurationMillis>12000</blockedDurationMillis>\n    </jenkins.metrics.impl.TimeInQueueAction>\n' +
+      '    <jenkins.metrics.impl.SubTaskTimeInQueueAction plugin="metrics@4.2.37">\n' +
+      '      <blockedDurationMillis>0</blockedDurationMillis>\n    </jenkins.metrics.impl.SubTaskTimeInQueueAction>\n' +
+      '  </actions>\n  <queueId>5289</queueId>\n  <timestamp>1791727340312</timestamp>\n' +
+      '  <startTime>1791727340609</startTime>\n  <result>ABORTED</result>\n' +
+      '  <description>PULL REQUEST</description>\n  <duration>222033</duration>\n  <keepLog>false</keepLog>\n' +
+      '  <execution class="org.jenkinsci.plugins.workflow.cps.CpsFlowExecution">\n' +
+      '    <result>FAILURE</result>\n    <script>a -&gt; b &lt;timestamp&gt;1&lt;/timestamp&gt;</script>\n' +
+      '    <timestamp>1</timestamp>\n  </execution>\n  <completed>true</completed>\n</flow-build>\n';
+    assert.deepEqual(parseBuildXml(real, 'PR-8', 1), {
+      job: 'PR-8',
+      number: 1,
+      running: 1791727340312,
+      finished: 1791727340609 + 222033,
+      result: 'ABORTED',
+      blockedMs: 12000,
+    });
+  });
+
   it('ignores a record without a timestamp', () => {
     assert.equal(parseBuildXml(xml({ result: 'SUCCESS' }), 'main', 1), null);
   });
