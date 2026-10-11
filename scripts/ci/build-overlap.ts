@@ -54,7 +54,8 @@ export function parseBuildXml(xml: string, job: string, number: number): BuildRe
     number,
     running: timestamp,
     finished,
-    result,
+    // While RUNNING the top-level result is not written yet: any <result> found belongs to an action.
+    result: finished === null ? null : result,
     blockedMs: blocked ? Number(blocked[1]) : null,
   };
 }

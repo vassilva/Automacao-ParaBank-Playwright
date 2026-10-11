@@ -49,8 +49,16 @@ describe('parseBuildXml()', () => {
   });
 
   it('a build without result or duration is still RUNNING', () => {
-    const r = parseBuildXml(xml({ timestamp: 1000, startTime: 1000 }), 'main', 6);
+    const r = parseBuildXml(
+      xml(
+        { timestamp: 1000, startTime: 1000 },
+        '<some.Action><result>SUCCESS</result></some.Action>',
+      ),
+      'main',
+      6,
+    );
     assert.equal(r?.finished, null);
+    assert.equal(r?.result, null, "an action's result is not the build result");
   });
 
   it('ignores a record without a timestamp', () => {
