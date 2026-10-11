@@ -1,0 +1,21 @@
+// Fixture of the queue-serialization test (run.sh): the same shape as the real Jenkinsfile (agent
+// none, a first stage on the controller, then ONE agent block with a stage timeout), with the work
+// replaced by a behavior chosen per branch (behavior.sh).
+pipeline {
+  agent none
+  options { buildDiscarder(logRotator(numToKeepStr: '50')) }
+  stages {
+    stage('Build Context') {
+      steps {
+        echo "QIT start ${env.BUILD_TAG}"
+      }
+    }
+    stage('Serialized Pipeline') {
+      agent any
+      options { timeout(time: 30, unit: 'SECONDS') }
+      steps {
+        sh 'sh /tmp/qit/behavior.sh "$BRANCH_NAME"'
+      }
+    }
+  }
+}

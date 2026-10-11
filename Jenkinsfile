@@ -5,7 +5,8 @@
 //   -> MANUAL merge by the repository owner in GitHub (no auto-merge) -> main: QA Regression (24)
 //   -> automatic UAT promotion of the validated image -> UAT Smoke (4) -> SUCCESS
 //
-//   PUSH (branch, by prefix; a branch with an open PR is built as the PR only):
+//   PUSH (branch, by prefix; a branch with an open PR is built as the PR only; only main and PR-<n>
+//   are built automatically, every other branch only when started manually, docs/ci-cd.md):
 //     feature/* and others  DEVELOPER     Quality Gates -> app image -> QA Smoke (4)
 //     qa/*                  QA            Quality Gates -> app image -> QA Impacted Tests (vs main)
 //     config/*              CONFIGURATOR  Quality Gates -> Config Check (no image, no deployment)
@@ -19,13 +20,14 @@
 //                      -> UAT Smoke (4) [-> Known Defects, optional] -> Deployment Record
 //                      -> Validation Complete. No manual approval, no UAT Regression.
 //
-// STRICT SERIALIZATION: every build of this job (PR, main, branch push) runs all its work inside
-// ONE agent block whose first step after the workspace guard is the global pipeline lock
-// (scripts/ci/pipeline-lock.sh), released in that block's post section on every outcome. So only
-// one pipeline executes at a time, a PR can never change QA while main runs Regression, and a lock
-// holder never needs a second executor (no deadlock with builds waiting for the lock). Waiting is
-// bounded (PARABANK_LOCK_WAIT_MINUTES, 180); a waiting build occupies one executor (no lock plugin
-// is installed); others stay in the Jenkins queue.
+// STRICT SERIALIZATION, in the Jenkins QUEUE: the plugin jenkins/parabank-serial-queue-plugin
+// (installed on the controller by the administrator) keeps every build of this job QUEUED while
+// another one (PR, main, branch) is active: one RUNNING build, the others without any executor,
+// released one at a time, oldest first. A Jenkinsfile cannot do this (a build is RUNNING before its
+// first step). FALLBACK, kept: all the work runs inside ONE agent block whose first step after the
+// workspace guard is the global pipeline lock (scripts/ci/pipeline-lock.sh), released in that
+// block's post section on every outcome; with the dispatcher it is always free, and a build that
+// has to wait for it logs a WARNING. Waiting is bounded (PARABANK_LOCK_WAIT_MINUTES, 180).
 //
 // SUPERSEDING: after taking the lock, a build whose commit is no longer the head of its PR or
 // branch (main included) ends ABORTED ("cancelled"/"error" on GitHub, never "skipped"); before UAT
@@ -110,8 +112,9 @@ pipeline {
   options {
     buildDiscarder(logRotator(numToKeepStr: '20'))
     timestamps()
-    // No disableConcurrentBuilds(): serialization across ALL branches and PRs of this job is the
-    // global pipeline lock (see the header); superseding is done by head checks.
+    // No disableConcurrentBuilds() (per branch only): serialization across ALL branches and PRs of
+    // this job is the queue dispatcher, with the pipeline lock as fallback (see the header);
+    // superseding is done by head checks.
   }
 
   parameters {

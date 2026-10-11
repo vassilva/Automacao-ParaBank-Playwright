@@ -4,9 +4,11 @@
 #   sh scripts/ci/pipeline-lock.sh acquire <owner>
 #   sh scripts/ci/pipeline-lock.sh release <owner>
 #
-# One pipeline at a time: the Jenkinsfile takes this lock as the first thing in its single agent
-# block and releases it in that block's post section (success, failure, abort, timeout). Plain sh
-# and the Docker CLI only, so it also works when `npm ci` failed.
+# FALLBACK of the queue-level serialization (Jenkins plugin jenkins/parabank-serial-queue-plugin),
+# which keeps every other build QUEUED, so this lock is normally free when a build arrives. It stays
+# as defense in depth (and for a Jenkins without the dispatcher): the Jenkinsfile takes it as the
+# first thing in its single agent block and releases it in that block's post section (success,
+# failure, abort, timeout). Plain sh and the Docker CLI only, so it also works when `npm ci` failed.
 #
 # How: creating a Docker network is atomic in the daemon (verified: 60 concurrent creates of one
 # name -> exactly one network), so the build that creates it holds the lock. Labels record the
@@ -63,6 +65,11 @@ case "$command" in
       fi
       if [ "$current" != "$reported" ]; then
         echo "Waiting for the pipeline lock held by ${current:-unknown} (up to $WAIT_MINUTES min)"
+        if [ -z "$reported" ]; then
+          echo "WARNING: two builds are RUNNING together. With queue-level serialization installed" \
+            "(plugin jenkins/parabank-serial-queue-plugin) a build never waits here;" \
+            "this lock is only the fallback (docs/ci-cd.md, Scheduling)." >&2
+        fi
         reported=$current
       fi
       if [ "$(date +%s)" -ge "$deadline" ]; then

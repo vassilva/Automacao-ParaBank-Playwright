@@ -109,6 +109,7 @@ describe('gate-defining pattern list (.github/gate-defining-paths.json)', () => 
     const { gateDefiningPaths } = await load();
     const files = [
       'Jenkinsfile',
+      'jenkins/parabank-serial-queue-plugin/src/main/java/io/github/vassilva/parabank/SerialQueueDispatcher.java',
       'scripts/ci/app-image.ts',
       '.github/workflows/gate-guard.yml',
       '.github/scripts/gate-review.mjs',

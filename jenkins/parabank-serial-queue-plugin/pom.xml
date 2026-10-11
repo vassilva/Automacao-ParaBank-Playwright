@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ParaBank serial queue: a minimal Jenkins plugin (one QueueTaskDispatcher, Jenkins core APIs only)
+  that keeps at most one build of the ParaBank Multibranch project RUNNING; every other build of it
+  stays QUEUED. A plugin, not an init.groovy.d script, because Jenkins loads the persisted queue and
+  runs init scripts in the same startup phase with no order between them, while a plugin's extension
+  is registered before the queue is loaded (docs/ci-cd.md, "Scheduling").
+  Build: sh jenkins/parabank-serial-queue-plugin/build.sh  ->  target/parabank-serial-queue.hpi
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.jenkins-ci.plugins</groupId>
+    <artifactId>plugin</artifactId>
+    <version>5.9</version>
+    <relativePath />
+  </parent>
+
+  <groupId>io.github.vassilva.parabank</groupId>
+  <artifactId>parabank-serial-queue</artifactId>
+  <version>1.0.0</version>
+  <packaging>hpi</packaging>
+  <name>ParaBank serial queue</name>
+  <description>One ParaBank pipeline build RUNNING at a time; the others wait in the Jenkins queue.</description>
+  <url>https://github.com/vassilva/Automacao-ParaBank-Playwright/tree/main/jenkins/parabank-serial-queue-plugin</url>
+  <scm>
+    <connection>scm:git:https://github.com/vassilva/Automacao-ParaBank-Playwright.git</connection>
+    <url>https://github.com/vassilva/Automacao-ParaBank-Playwright</url>
+    <tag>HEAD</tag>
+  </scm>
+
+  <properties>
+    <!-- The Jenkins this repository's CI runs on (Java 17). -->
+    <jenkins.version>2.541.2</jenkins.version>
+    <maven.compiler.release>17</maven.compiler.release>
+  </properties>
+
+  <repositories>
+    <repository>
+      <id>repo.jenkins-ci.org</id>
+      <url>https://repo.jenkins-ci.org/public/</url>
+    </repository>
+  </repositories>
+  <pluginRepositories>
+    <pluginRepository>
+      <id>repo.jenkins-ci.org</id>
+      <url>https://repo.jenkins-ci.org/public/</url>
+    </pluginRepository>
+  </pluginRepositories>
+</project>

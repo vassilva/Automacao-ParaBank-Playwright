@@ -9,3 +9,6 @@ deployment/
 # Playwright default output folders (this project writes to reports/; never commit either)
 test-results/
 playwright-report/
+
+# ParaBank serial-queue plugin build output
+jenkins/parabank-serial-queue-plugin/target/

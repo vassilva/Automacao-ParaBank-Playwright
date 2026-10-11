@@ -1,6 +1,7 @@
 # CI/CD: PR Smoke, manual merge, QA Regression, automatic UAT promotion, UAT Smoke
 
-One `Jenkinsfile`, one **Multibranch Pipeline**, one pipeline at a time. The definitive flow:
+One `Jenkinsfile`, one **Multibranch Pipeline**, one pipeline at a time (held in the Jenkins queue,
+see "Scheduling"). The definitive flow:
 
 ```
 LOCAL DEVELOPMENT (tests written and run against QA) ─> PUSH TO A FEATURE BRANCH ─> PULL REQUEST
@@ -12,7 +13,7 @@ LOCAL DEVELOPMENT (tests written and run against QA) ─> PUSH TO A FEATURE BRAN
 ```
 
 ```
-PUSH, by branch prefix (a branch with an open PR is built as the PR only):
+PUSH, by branch prefix, started manually (only main and PR-<n> build automatically):
   feature/*, others  DEVELOPER     QUALITY GATES ─> APP IMAGE ─> QA READY ─> QA SMOKE (4)
   qa/*               QA            QUALITY GATES ─> APP IMAGE ─> QA READY ─> QA IMPACTED TESTS
   config/*           CONFIGURATOR  QUALITY GATES ─> CONFIG CHECK          (no image, no deployment)
@@ -31,7 +32,8 @@ MAIN (CD)          QUALITY GATES ─> APP IMAGE ─> QA READY ─> QA REGRESSION
 
 APP IMAGE = RESOLVE ─> [BUILD, only if no image from these inputs exists] ─> VERIFY
             ─> [DEPLOY QA, only if QA runs another image] (see "Application image")
-EVERY BUILD: WORKSPACE GUARD ─> ACQUIRE PIPELINE LOCK ─> ... ─> (post) RELEASE PIPELINE LOCK
+EVERY BUILD: QUEUED while another build of the job is active (queue dispatcher) ─> RUNNING
+             ─> WORKSPACE GUARD ─> PIPELINE LOCK (fallback, free) ─> ... ─> (post) RELEASE
 ```
 
 ```
@@ -138,6 +140,28 @@ GitHub, so discovery is a **periodic scan every 2 minutes**; a scan only builds 
 changed. The job discards removed branches (a merged PR's `PR-<n>` job disappears with its builds;
 GitHub keeps the checks).
 
+**Automatic triggering: only `main` and `PR-<n>`.** Branch discovery excludes a branch only
+_while_ it has an open PR. So a branch was built on its own before its PR was opened (the same
+commit then built again as the PR), and again right after its merge: the PR closes, the next scan
+discovers the branch as a new job, and a new job's first build is triggered by indexing. The real
+records show it after every merge (`main` #2–#5, each with the merged branch's #1 in the same scan,
+cause `BranchIndexingCause`). The branch source therefore has the branch property **"Suppress
+automatic SCM triggering"** (branch-api, no plugin) with "Branch names to trigger automatically"
+`main|PR-\d+` and the strategy "For matching branches schedule all builds (nothing is suppressed)":
+
+| Head                                     | Automatic build (indexing or event)            | Manual "Build Now"                   |
+| ---------------------------------------- | ---------------------------------------------- | ------------------------------------ |
+| `main`                                   | yes: the post-merge pipeline always runs       | yes                                  |
+| `PR-<n>`                                 | yes: the required pre-merge validation         | yes                                  |
+| any other branch (no PR, or after merge) | **no**: the job exists, nothing runs by itself | yes: the push roles below, on demand |
+
+Isolated Jenkins (`npm run test:queue`): a push to a branch without PR builds nothing; merging it
+into `main` builds `main` once and not the branch; a newly discovered branch gets a job but no build;
+a new PR commit builds that PR once; a manual branch build still runs (serialized like any other).
+The rule matches by name, so it is the same for GitHub events (not reproducible offline).
+Deleting the head branch after a merge (GitHub "Automatically delete head branches") also removes
+the leftover branch job; optional.
+
 ## Stages, in execution order
 
 | #    | Stage                                                   |        PR         |       push       |   main    | What it does                                                                                                                                                     |
@@ -145,7 +169,7 @@ GitHub keeps the checks).
 | 1    | Build Context                                           |         ✓         |        ✓         |     ✓     | Mode (`CHANGE_ID` → PR; `main` → MAIN; else PUSH), role by prefix, plan, build tag (no executor)                                                                 |
 | 2    | **Serialized Pipeline**                                 |         ✓         |        ✓         |     ✓     | ONE agent block for all the work below; timeout 300 min                                                                                                          |
 | 2.1  | ↳ Workspace Guard                                       |         ✓         |        ✓         |     ✓     | Clean reports, no `.env`, 1 worker, 0 retries                                                                                                                    |
-| 2.2  | ↳ Acquire Pipeline Lock                                 |         ✓         |        ✓         |     ✓     | Global lock (bounded wait); then superseded commit → ABORTED                                                                                                     |
+| 2.2  | ↳ Acquire Pipeline Lock                                 |         ✓         |        ✓         |     ✓     | Fallback lock (free under the queue dispatcher); then superseded commit → ABORTED                                                                                |
 | 2.3  | ↳ Install, Quality Gates                                |         ✓         |        ✓         |     ✓     | `npm ci`; lint, format, typecheck, strict dry run, test-data audit, `test:ci` (pipeline/merge-policy tests), BDD structure (77/25), suite inventories 4/10/24/52 |
 | 2.4  | ↳ Config Check                                          |         ✓         |     config/*     |     –     | Compose for QA/UAT, `source.env`, `.env.example`                                                                                                                 |
 | 2.5  | ↳ Resolve / Build / Verify Application Image, Deploy QA |         ✓         | ✓ (not config/*) |     ✓     | REUSE / DEPLOY / BUILD (see "Application image"); revision and inputs digest checked                                                                             |
@@ -162,36 +186,136 @@ GitHub keeps the checks).
 | post | release the lock                                        |         ✓         |        ✓         |     ✓     | Junit, environment logs (redacted), pointers, build tag removal, **lock release**, archive                                                                       |
 | 3    | Validation Complete                                     |         ✓         |        ✓         |     ✓     | Fails unless every flag of the plan is set (main: Regression, promotion, UAT ready, UAT Smoke)                                                                   |
 
-## Strict serialization (one pipeline at a time)
+## Scheduling: one pipeline at a time, enforced in the Jenkins queue
 
-Every build of the job (PR, `main`, branch push) runs all its work inside one agent block whose
-first step after the workspace guard is the **global pipeline lock**
-(`scripts/ci/pipeline-lock.sh`), released in that block's `post` section on SUCCESS, FAILURE,
-ABORTED and timeout. Therefore:
+**Requirement:** across every build of the job (PRs, `main`, branches) at most **one** is RUNNING;
+every other build stays **QUEUED** in Jenkins, without any executor, checkout, Docker operation or
+test, until the active build finished; then exactly one queued build starts.
 
-- only one pipeline executes at a time, across all branches and PRs (a per-branch lock would not
-  be enough); a PR can never change QA while `main` runs Regression or promotes UAT;
-- the holder never needs a second executor (QA and UAT run in the same agent block, nothing
-  allocates a node after the lock), so builds waiting for the lock cannot deadlock it;
-- **queueing:** a build waiting for the lock occupies one executor (the built-in node has 2) and
-  polls every 15 s, naming the holder; further builds stay in the Jenkins queue without an
-  executor. Waiting is bounded (`PARABANK_LOCK_WAIT_MINUTES`, 180): then the build fails;
-- **release:** plain `sh` + Docker CLI, so it works even when `npm ci` failed; owner-scoped (a build
-  can only release its own lock); idempotent;
-- **stale locks:** a lock older than 330 min (longer than the 300-min pipeline timeout) can only
-  belong to a build that died without its `post` section (Jenkins crash, hard kill); the next
-  waiter removes it loudly. Nobody needs to remove an active lock by hand;
-- **outdated images:** after taking the lock, a build whose commit is no longer the head of its PR
-  or branch ends ABORTED; before UAT, `main`'s head is checked again (fail-closed), so a queued
-  older `main` build can never promote an outdated image.
+**Why the pipeline lock alone could not do it:** a Pipeline build is RUNNING as soon as it leaves
+the Jenkins queue, before its first step runs (`agent none` stages run on the controller's
+flyweight executor). Anything inside the `Jenkinsfile` (the Docker-network lock, the Lockable
+Resources `lock` step, `options { lock(...) }`, a `node` waiting for an executor) can only make an
+already RUNNING build wait. Real evidence (`scripts/ci/build-overlap.ts` on the real build records):
+after each of the last four merges, `main` and the merged source branch became RUNNING in the same
+branch-indexing pass, 11 to 63 ms apart, 0 s blocked in the queue, and were RUNNING together for
+330 s to 5.2 h (`main` #5 and `ci/serialized-pipeline-auto-uat` #1: 330 s, the second one waiting
+for the lock). Options compared:
 
-The lock is an atomic Docker network (60 concurrent creates of one name produced exactly one) with
-owner and time labels, compatible with the previous `host-lock.ts`. Not covered: Jenkins builds the
-small CI agent image (`docker/ci-agent`, normally cached) before entering the agent block. A
-Jenkins-native alternative (Lockable Resources plugin, `options { lock(...) }`, waiting without an
-executor) would need a plugin installation by the Jenkins administrator; it is not installed.
-Tested locally (`npm run test:lock`, on a throwaway lock name): waiting, release, owner-only
-release, bounded wait, stale recovery, and 5 concurrent pipelines strictly one at a time.
+| Mechanism                                      | Waiting build                               | Why (not) chosen                                                                                                                                                                                                               |
+| ---------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `scripts/ci/pipeline-lock.sh` (Docker network) | RUNNING, holds an executor                  | Mutual exclusion only; kept as fallback                                                                                                                                                                                        |
+| Lockable Resources `lock` / `options { lock }` | RUNNING ("waiting for resource")            | Same limit (a step of a running build); plugin not installed                                                                                                                                                                   |
+| `disableConcurrentBuilds()`                    | QUEUED, but only behind the **same branch** | Each branch and PR is its own job                                                                                                                                                                                              |
+| Throttle Concurrent Builds (job property)      | set by the Jenkinsfile                      | Applies only after a job's first build: every new PR job's first build would escape; plugin not installed                                                                                                                      |
+| Queue dispatcher as an `init.groovy.d` script  | QUEUED, until a Jenkins restart             | Tried and rejected: Jenkins loads the saved queue and runs init scripts in the same startup phase (`@Initializer(after = JOB_CONFIG_ADAPTED)`, no order); restored builds started before it existed (observed in a crash test) |
+| **Queue dispatcher as a minimal plugin**       | **QUEUED, no executor, reason shown**       | **Chosen:** Jenkins core extension point, consulted before an item leaves the queue; registered with the plugins, before the queue is loaded                                                                                   |
+
+**Mechanism:** the plugin
+[`jenkins/parabank-serial-queue-plugin`](../jenkins/parabank-serial-queue-plugin) (one class,
+[`SerialQueueDispatcher`](../jenkins/parabank-serial-queue-plugin/src/main/java/io/github/vassilva/parabank/SerialQueueDispatcher.java),
+Jenkins core APIs only, no plugin dependency) registers a `QueueTaskDispatcher` on the controller.
+For a queue item whose task is a build of a
+job inside `Automacao-ParaBank-Playwright`, it answers "blocked" while the project is busy, judged by
+three independent signals (no gap between "left the queue" and "build record exists"): an item of
+the project already released by the queue (pending or buildable), an executor (flyweight or
+heavyweight) working for a build of the project, or a build of the project that has not finished
+(also a build resumed after a restart). The queue shows the reason: "ParaBank serial queue: waiting
+for Automacao-ParaBank-Playwright » main #6 to finish". The queue's maintenance is single-threaded
+and a released build is pending at once, so the next item checked in the same pass is blocked (no
+race). Never blocked: branch indexing, the executor requests of the running build (its `node`
+blocks), resumption after a restart, and every other Jenkins job. If the check itself fails, the
+build stays queued (fail closed) and the reason says so. Jenkins writes the queue to disk only on a
+clean shutdown, so the dispatcher saves it (off the queue lock) as soon as it starts holding a new
+build: held builds survive a crash (without the save they were observed lost).
+
+**Fallback (kept):** all the work still runs in one agent block that takes the Docker-network lock
+first and releases it in its `post` section on SUCCESS, FAILURE, ABORTED and timeout (owner-scoped,
+idempotent, bounded wait `PARABANK_LOCK_WAIT_MINUTES` 180, stale after 330 min; `npm run test:lock`).
+With the dispatcher installed it is always free; a build that has to wait for it logs
+`WARNING: two builds are RUNNING together`, which means the dispatcher is missing. It is removed only
+after the dispatcher has been validated on the real Jenkins over several merges (a separate PR).
+Superseding is unchanged: after taking the lock, a build whose commit is no longer the head of its
+PR or branch ends ABORTED, and `main`'s head is checked again before UAT, so a long-queued older
+build never promotes an outdated image.
+
+**Order and fairness:** blocked builds are released in queue order (oldest first): nobody starves,
+and `main` is never skipped (it waits like any build; its post-merge pipeline always runs). Repeated
+triggers of one branch while it is queued fold into one queue item. A queued build waits without a
+time limit (it uses nothing); the RUNNING build is bounded by its 300-min timeout.
+
+### Validation of the scheduling
+
+**Isolated throwaway Jenkins** (`npm run test:queue`): same image (2.541.2) and plugin set as the real
+Jenkins, `--network none`, memory-capped, 2 executors; a Multibranch project with the real project's
+name on a local Git repository; a fixture `Jenkinsfile` with the real shape (`agent none`, a
+controller stage, one agent block with a stage timeout). Real Jenkins scheduling, sampled every
+100 ms (1,860 samples in the final run) and checked again on the build records:
+
+| Check                                                                                | Result                                                                                               |
+| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| Negative control, **without** the dispatcher                                         | 4 builds of the project RUNNING together (the real problem reproduced)                               |
+| Plugin deployed without a restart (CLI `install-plugin -deploy`, as "Deploy Plugin") | active and enabled, no dependency, exactly one dispatcher registered                                 |
+| `main` RUNNING, a PR triggered                                                       | PR QUEUED (blocked, reason names `main`), no build record, no executor, although an executor is idle |
+| PR RUNNING, `main` triggered                                                         | `main` QUEUED, then ran to SUCCESS                                                                   |
+| 3 PRs and `main` competing                                                           | one at a time, released in queue order                                                               |
+| Manual branch build vs PR build (both directions)                                    | the second one QUEUED until the first finished                                                       |
+| Holder ends SUCCESS / FAILURE / ABORTED / stage timeout                              | the next queued build starts, every time                                                             |
+| Jenkins restart ×2 (JVM exit + `unless-stopped` policy, as the real container)       | plugin active again at start; queued builds kept, none started during startup; then one at a time    |
+| Crash ×3 (`docker restart -t 0`)                                                     | same; the queued builds survive thanks to the queue save                                             |
+| Unrelated job                                                                        | runs concurrently (not held)                                                                         |
+| Three triggers of one queued PR                                                      | one queue item, one build                                                                            |
+| Monitor over all scenarios                                                           | max RUNNING 1, no executor used by two project jobs, 0 violations                                    |
+| `build-overlap.ts` on the build records after installation                           | 38 builds, **0** overlapping RUNNING intervals                                                       |
+
+Not covered by the isolated run: GitHub events and pull-request discovery (no network; PRs are
+simulated by branches named `PR-<n>`) and the real `Jenkinsfile`'s Docker work. On the real Jenkins
+the evidence is the build records: `build-overlap.ts` (RUNNING intervals) and the metrics plugin's
+blocked time per build.
+
+### Installation and rollback (Jenkins administrator)
+
+Install while no build of the project is running. The old and the new `Jenkinsfile` both keep the
+fallback lock, so no installation order can create concurrency:
+
+1. Build it: `sh jenkins/parabank-serial-queue-plugin/build.sh` (Maven in Docker; parent POM 5.9,
+   Jenkins 2.541.2, Java 17) → `jenkins/parabank-serial-queue-plugin/target/parabank-serial-queue.hpi`.
+2. Deploy it, no restart needed: **Manage Jenkins → Plugins → Advanced settings → Deploy Plugin**,
+   choose the `.hpi`, **Deploy**. Jenkins loads it at once; from then on it loads with the plugins
+   at every start, before the queue.
+3. Check: **Manage Jenkins → Plugins → Installed** lists "ParaBank serial queue" 1.0.0, enabled; the
+   Jenkins log has `ParaBank serial queue active for [Automacao-ParaBank-Playwright]`; with one build
+   running, a second one is listed in the Build Queue with the reason above and has no build number.
+
+Rollback: **Manage Jenkins → Plugins → Installed → ParaBank serial queue → Uninstall**, then restart
+Jenkins while idle (or untick it to disable it). Builds are then serialized by the fallback lock only
+(two RUNNING, one of them waiting), as before.
+
+**Limits:** the dispatcher is controller configuration, not part of the build. A Jenkins without it
+(or a renamed job: system property `parabank.serialQueue.projects`) falls back to the lock, which
+the `WARNING` makes visible. An administrator can uninstall it. It is a private plugin of this
+repository (not from the Jenkins update center): it uses only long-stable core APIs
+(`QueueTaskDispatcher`, `Queue`, `Executor`, `Job`, `Run`), and is rebuilt only if those change.
+
+### Audit of the plugin (2026-10-11)
+
+| Area           | Result                                                                                                                                                                                                                                                                                                                              |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Attack surface | No HTTP endpoint, form, permission, credential, network access, script evaluation or file I/O of its own (only Jenkins' `Queue.save()`); runs inside the queue maintenance, on no user input                                                                                                                                        |
+| Dependencies   | Bundles nothing (the `.hpi` holds only its own jar: two classes); direct dependencies `jenkins-core` 2.541.2, `jakarta.servlet-api`, `commons-logging`, all `provided` by Jenkins. The build verifies every download's checksum (`mvn -C`)                                                                                          |
+| Compatibility  | Manifest `Jenkins-Version: 2.541.2` (the minimum; the real Jenkins is 2.541.2), bytecode Java 17 (the real Jenkins runs 17.0.18), no plugin dependency; core APIs stable for many years. After a Jenkins upgrade: run `npm run test:queue` with the new image before relying on it                                                  |
+| Concurrency    | `canRun` reads queue and executor snapshots; its own state is a synchronized set and an atomic flag; the queue save runs on Jenkins' timer, outside the queue lock, at most one at a time                                                                                                                                           |
+| Failure modes  | Check error: the ParaBank build stays queued (fail closed, reason shown). Plugin missing, disabled or the job renamed: builds are serialized by the fallback lock only, with the `WARNING`. A ParaBank build that started another ParaBank build and waited for it would wait until its timeout (the `Jenkinsfile` never does this) |
+| Exposure       | Queue reasons name the holding build (visible to logged-in users, as the queue already is); log line names the serialized project                                                                                                                                                                                                   |
+
+**Artifact:** the build is not byte-reproducible (jar timestamps), so record the SHA-256 of the exact
+`.hpi` you deploy (`sha256sum jenkins/parabank-serial-queue-plugin/target/parabank-serial-queue.hpi`);
+its classes are identical across rebuilds of the same source.
+
+**Evidence retention:** the job prunes removed branches, which deletes their build records; a
+branch job removed after its PR was opened takes its builds with it (seen with
+`ci/queue-level-serialization` #1, which `PR-8` #1 waited for). With the branch property such builds
+no longer start; `build-overlap.ts` judges the records that remain.
 
 ## Gates
 
@@ -229,6 +353,9 @@ longer read (the manual approval was removed); they can be deleted from Jenkins 
 is on `main`.
 
 ## Roles: push validation by branch prefix
+
+Push builds run only when started manually (Build Now on the branch job): only `main` and `PR-<n>`
+are triggered automatically (see "Jenkins job and GitHub discovery").
 
 | Branch      | Role         | Validation on push (no PR yet)                                           | Deploys QA? |
 | ----------- | ------------ | ------------------------------------------------------------------------ | :---------: |
@@ -429,10 +556,18 @@ JavaScript, `…number:!0,password:!0`, not data.)
 2. **After this version is on `main`:** delete the obsolete Jenkins global properties
    `PARABANK_UAT_APPROVERS` and `PARABANK_UAT_APPROVAL_MINUTES` (Manage Jenkins → System → Global
    properties); nothing reads them any more.
-3. **Optional:** install the Lockable Resources plugin if waiting builds should not occupy an
-   executor; enable "Automatically delete head branches" to avoid one branch build after each
-   merge; delete the stale `feature/ci-jenkins-pipeline` branch; delete `main` #1 (unredacted
+3. **Jenkins administrator, once:** install the queue dispatcher (see "Installation and
+   rollback") and set the branch property "Suppress automatic SCM triggering" (`main|PR-\d+`, see
+   "Jenkins job and GitHub discovery").
+4. **Optional:** enable "Automatically delete head branches" in GitHub (removes leftover branch
+   jobs); delete the stale `feature/ci-jenkins-pipeline` branch; delete `main` #1 (unredacted
    synthetic data, see "Artifacts archived before the log-redaction fix").
+5. **Security updates (found 2026-10-11, independent of the pipeline):** Jenkins 2.541.2 is
+   affected by the core advisory of 2026-09-02 (high; fixed in LTS 2.568.3), and the installed
+   Script Security 1399 by the sandbox-bypass advisories of 2026-09-02 and 2026-09-16 (high; fixed in
+   1422); Pipeline: Multibranch 821 (low; fixed in 842) and Pipeline: Groovy Libraries 787 (medium;
+   fixed in 806) too. Upgrade them, then run `npm run test:queue` against the upgraded image before
+   relying on the serial-queue plugin again.
 
 ## Failure, rollback and recovery
 
@@ -446,8 +581,11 @@ JavaScript, `…number:!0,password:!0`, not data.)
   `docker image inspect parabank-uat:current --format '{{.Id}}'`, then
   `npm run -s env -- deploy uat <that ID>`, `npm run uat:health`, `TARGET_ENV=uat npm run test:smoke`.
   Then fix forward through a PR.
-- **A build waits for the lock:** its console names the holder. Normal: let the holder finish. A
-  waiter fails after 180 min; a lock older than 330 min (holder died) is removed by the next waiter.
+- **A build is QUEUED ("ParaBank serial queue: waiting for … to finish"):** normal; it starts when
+  the named build finishes. Never cancel the running build to make room.
+- **A build waits for the pipeline lock** (`WARNING: two builds are RUNNING together`): the queue
+  dispatcher is not active (Jenkins without the init script, or removed); reinstall it. The waiter
+  still fails after 180 min; a lock older than 330 min (holder died) is removed by the next waiter.
   Never remove an active lock by hand.
 - **Leftover build tags:** `docker image ls parabank-ci`; for a tag whose build has finished,
   `docker image rm parabank-ci:<tag>` (an image QA or UAT runs stays).
@@ -472,9 +610,16 @@ JavaScript, `…number:!0,password:!0`, not data.)
 | `gate-review`                               | success on ordinary PRs, failure on an unreviewed gate-defining PR, posted by GitHub Actions (app 15368)                                                                                                                                                            |
 | Repository settings and rulesets            | auto-merge disabled; ruleset `24842741` (checks) and `24856083` (restrict updates) active; owner bypass: `never` / `pull_requests_only`                                                                                                                             |
 
-**This version (serialized pipeline, automatic UAT promotion, no approval) has not run on the real
-Jenkins yet.** Its first real runs are the PR that introduces it and the `main` build after the
-owner merges it.
+**Serialized pipeline with automatic UAT promotion (PR #7):** real `main` #5 SUCCESS (QA Regression,
+automatic UAT promotion, UAT Smoke); the same scan also started the merged branch
+`ci/serialized-pipeline-auto-uat` #1, RUNNING alongside it and waiting for the lock: the defect
+"Scheduling" fixes.
+
+**Queue-level scheduling (plugin) and branch triggering: not yet validated on the real Jenkins.**
+The plugin is not installed there and the branch property is not set (administrator steps,
+"Installation and rollback"). Until then the real Jenkins still runs with the fallback lock only.
+Real validation: `build-overlap.ts` on the real build records after the next builds, plus the Build
+Queue showing a held build with the plugin reason.
 
 **Isolated throwaway Jenkins** (same image and plugin set, no network): the official Declarative
 linter validates this `Jenkinsfile`; earlier runs there proved the sandboxed flag lookup, UNSTABLE →
@@ -484,7 +629,8 @@ FAILURE and the head-check ABORTED result.
 serialization structure, automatic promotion and its fail-closed checks, the application-image
 decision, PR Regression deferral, the gate-review policy including fail-closed), `npm run test:lock`
 (lock concurrency on the local Docker daemon), lint, format, typecheck, dry run, test-data audit,
-BDD structure, suite inventories, config check, actionlint, Groovy parse.
+BDD structure, suite inventories, config check, actionlint, Groovy parse; `npm run test:queue`
+(queue-level scheduling and branch triggering in an isolated Jenkins, see "Scheduling").
 
 ## Readiness: database initialized
 
