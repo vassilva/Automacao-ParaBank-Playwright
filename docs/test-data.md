@@ -75,3 +75,21 @@ ID `999999999` (deliberately non-existent identifiers, single scenario), and the
   customer; phone numbers collided across scenarios. After: every category unique per scenario,
   except state (50 valid codes) and the values a scenario provides on purpose (the taken username,
   PB-15's duplicate SSN, PB-16's blank names, PB-12's other person).
+
+## Strategy review (2026-10-12)
+
+Re-audited against the current code (`npm run audit:test-data` OK, 77 scenarios); no change was
+needed.
+
+| Aspect                  | Status                                                                                                                                                                                                                                                                                    |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Synthetic generation    | One allocator (`src/factories/test-data.ts`); lint keeps `Math.random` out of steps and Page Objects                                                                                                                                                                                      |
+| Unique customer/account | Fresh customer per scenario via public registration; accounts opened by the scenario                                                                                                                                                                                                      |
+| Isolation, dependencies | Nothing shared; scenarios pass in any order; one worker (PB-20)                                                                                                                                                                                                                           |
+| Boundaries, negatives   | Scenario Outline partitions and minimal pairs, every repetition registered in `scripts/audit-test-data.ts`                                                                                                                                                                                |
+| Environment differences | QA and UAT run the same image ID; SSN cursor per environment                                                                                                                                                                                                                              |
+| Sensitive data          | Generated credentials and SSNs registered for redaction at creation; audit output is HMAC fingerprints                                                                                                                                                                                    |
+| Cleanup                 | None per scenario: the only reset ParaBank offers is the global admin database clean, which the suite must not use (shared state). Data accumulates in long-lived QA/UAT databases; uniqueness (run token + serial, SSN cursor) keeps it harmless, and a deploy starts from the seed data |
+
+Remaining risk (unchanged): customers created outside the suite on a never-redeployed database
+can still share an SSN with a suite customer (PB-15).

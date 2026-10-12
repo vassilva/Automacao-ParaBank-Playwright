@@ -324,7 +324,17 @@ npm run typecheck      # tsc --noEmit, strict
 ```
 
 ESLint rejects `waitForTimeout` and `page.pause`. Synchronization is done on observable state:
-locator assertions, URLs, and the specific network responses each page action waits for.
+locator assertions, URLs, and the specific network responses each page action waits for. It also
+enforces the layer rules: no `networkidle`, `force: true` or XPath; no selectors or `Math.random`
+in step definitions; no assertions in Page Objects; no Playwright `test()` blocks in `src/`.
+
+## AI-assisted work
+
+[AGENTS.md](AGENTS.md) is the single instruction source for AI coding agents (`CLAUDE.md` points
+to it). Reusable task prompts: [docs/ai/prompt-library.md](docs/ai/prompt-library.md); review
+standard for new or changed tests: [docs/ai/test-quality-gates.md](docs/ai/test-quality-gates.md);
+failure classification: [docs/failure-triage.md](docs/failure-triage.md); Playwright MCP
+evaluation: [docs/ai/playwright-mcp-assessment.md](docs/ai/playwright-mcp-assessment.md).
 
 ## CI
 

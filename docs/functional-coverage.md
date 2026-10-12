@@ -246,6 +246,24 @@ except to those two customers.
 - **CI coverage gate:** resolved in Baseline v2: `scripts/ci/verify-suite-coverage.ts` now validates
   each suite against its own approved size (docs/ci-cd.md).
 
+## API and UI coverage assessment (2026-10-12)
+
+The suite is already layered: the UI drives every business action, and `src/api/parabank-client.ts`
+(the endpoints ParaBank's own pages call) supplies the oracle: accounts, customer and transactions
+are read through the API after each money movement or profile change, customers are registered
+through it in setup, and the authorization scenarios (PB-01 to PB-03) send the pages' own
+requests for another customer's resources. More than 40 call sites in steps and support code use
+it.
+
+Decision: **no separate API test suite or framework.** Every business rule ParaBank exposes is
+reachable through its UI, and each one is already proven once with a persisted-state oracle; an API
+suite would assert the same rules a second time (duplicated maintenance, no new risk covered). An
+API-level scenario is justified only for a rule the UI cannot reach or observe; it is then written
+in Gherkin with the existing client, as the authorization feature does. Candidates reviewed and
+not taken: Account Activity month/type filters and the transaction details page (read-only views of
+transactions already verified through the API), and the admin/database endpoints (they change
+shared global state).
+
 ## Artifact classification (sensitive data)
 
 | Artifact                                                                  | Can contain                                                                           | Protection                                                                                                                                                            | Class                                                                 |
