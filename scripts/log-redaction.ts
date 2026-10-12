@@ -19,8 +19,19 @@ const RULES: [RegExp, string][] = [
     new RegExp(String.raw`\b(password|repeatedPassword|username|ssn)(\s*[=:]\s*)${VALUE}`, 'gi'),
     `$1$2${MASK}`,
   ],
+  // Quoted values: key="value" / key='value'.
+  [/\b(password|repeatedPassword|username|ssn)(\s*[=:]\s*)(["'])[^"'\r\n]*\3/gi, `$1$2$3${MASK}$3`],
   // JSON fields.
   [/("(?:password|repeatedPassword|username|ssn)"\s*:\s*")[^"]*/gi, `$1${MASK}`],
+  // Tokens and keys (not used by ParaBank today; defense in depth for any service in the logs).
+  [
+    new RegExp(
+      String.raw`\b((?:access_|refresh_|id_)?token|x-api-key|api[_-]?key|client[_-]?secret)(\s*[=:]\s*)(["']?)${VALUE}`,
+      'gi',
+    ),
+    `$1$2$3${MASK}`,
+  ],
+  [/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/g, `$1 ${MASK}`],
   // Session ids and authorization material.
   [/(jsessionid=)[A-Za-z0-9.]+/gi, `$1${MASK}`],
   [/\b(cookie|set-cookie|authorization)(\s*[:=]\s*)[^\r\n]*/gi, `$1$2${MASK}`],
@@ -31,9 +42,12 @@ const RULES: [RegExp, string][] = [
   [/\b\d{3}-\d{2}-\d{4}\b/g, MASK],
 ];
 
-/** A credential field whose value survived redaction. */
+/**
+ * A credential field whose value survived redaction: any value after the key that is not the mask
+ * (also one starting with a character the rules above do not capture, e.g. `password=<...>`).
+ */
 const LEFTOVER = new RegExp(
-  String.raw`\b(password|repeatedPassword|username|ssn)\s*[=:]\s*(?!\[REDACTED\])[^\s,;\]&"'<>)]`,
+  String.raw`\b(password|repeatedPassword|username|ssn)\s*[=:]\s*(?!["']?\[REDACTED\])\S`,
   'i',
 );
 
