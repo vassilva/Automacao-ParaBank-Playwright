@@ -24,7 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import path from 'node:path';
-import { redactLog } from './log-redaction';
+import { collectLog } from './log-capture';
 import {
   ENVIRONMENTS,
   composeProject,
@@ -250,32 +250,33 @@ function identity(environment: EnvironmentName, expected?: string): string {
 }
 
 /**
- * `sinceMs` (epoch milliseconds, e.g. the Jenkins build start) limits the log to what happened
- * during this build: the environments are persistent, so a full log would repeat every earlier
- * build's history in each archive. Without it the whole container log is saved.
+ * `sinceMs` (epoch milliseconds, the Jenkins build start of a successful build) limits the log to
+ * that build; without it, or when that window cannot be trusted, the whole container log is saved
+ * (scripts/log-capture.ts). ParaBank logs customers in clear text (usernames, passwords, SSNs):
+ * every path is redacted line by line (scripts/log-redaction.ts).
  */
 function saveLog(environment: EnvironmentName, sinceMs?: string): void {
   const dir = path.join(process.env.REPORTS_DIR || 'reports', 'logs');
   mkdirSync(dir, { recursive: true });
-  const since: string[] = [];
-  if (sinceMs !== undefined) {
-    if (!/^\d{12,}$/.test(sinceMs))
-      throw new Error(`--logs-since-ms must be epoch ms, got "${sinceMs}"`);
-    since.push('--since', new Date(Number(sinceMs)).toISOString());
-  }
-  const raw = docker(
-    ['compose', 'logs', '--no-color', '--timestamps', ...since, 'parabank'],
-    composeEnv(environment),
-    false,
-    LOG_MAX_BUFFER,
-  );
-  // ParaBank logs customers in clear text (usernames, passwords, SSNs): redacted line by line, and
-  // any line that still looks like a credential is withheld (scripts/log-redaction.ts).
-  const safe = redactLog(raw);
+  const fetch = (since?: string) =>
+    docker(
+      [
+        'compose',
+        'logs',
+        '--no-color',
+        '--timestamps',
+        ...(since ? ['--since', since] : []),
+        'parabank',
+      ],
+      composeEnv(environment),
+      false,
+      LOG_MAX_BUFFER,
+    );
+  const log = collectLog(fetch, sinceMs, Date.now());
+  for (const warning of log.warnings) console.error(`WARNING: ParaBank log: ${warning}`);
   const file = path.join(dir, `${environment}.log`);
-  writeFileSync(file, safe);
-  const scope = since.length ? `since ${since[1]}` : 'whole container log';
-  console.log(`Saved redacted ParaBank log: ${file} (${scope})`);
+  writeFileSync(file, log.text);
+  console.log(`Saved redacted ParaBank log: ${file} (${log.scope})`);
 }
 
 function teardown(environment: EnvironmentName, keepRunning: boolean, logsSinceMs?: string): void {

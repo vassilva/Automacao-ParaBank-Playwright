@@ -654,15 +654,18 @@ pipeline {
           junit testResults: 'reports/qa/**/cucumber-junit.xml, reports/uat/**/cucumber-junit.xml, reports/uat/**/junit.xml', allowEmptyResults: true
           script {
             if (env.PIPELINE_LOCK_HELD == 'true' && fileExists('node_modules')) {
-              // QA and UAT stay running (persistent environments). Their logs since this build
-              // started are saved redacted (not their whole history, repeated in every archive) and
-              // the agent is detached from their networks.
-              withEnv(["LOGS_SINCE_MS=${currentBuild.startTimeInMillis}"]) {
+              // QA and UAT stay running (persistent environments). Their logs are saved redacted and
+              // the agent is detached from their networks. A build that is still SUCCESS here keeps
+              // only its own window (the whole history would repeat in every archive); a FAILURE,
+              // UNSTABLE or ABORTED build (already set when this post section runs) keeps the whole
+              // log, so a fault that began before the build is not lost.
+              def logScope = currentBuild.currentResult == 'SUCCESS' ? "--logs-since-ms ${currentBuild.startTimeInMillis}" : ''
+              withEnv(["LOG_SCOPE=${logScope}"]) {
                 if (env.DEPLOYS_QA == 'true') {
-                  sh 'npm run -s env -- teardown qa --keep-running --logs-since-ms "$LOGS_SINCE_MS" || true'
+                  sh 'npm run -s env -- teardown qa --keep-running $LOG_SCOPE || true'
                 }
                 if (env.UAT_PROMOTION_VERIFIED == 'true') {
-                  sh 'npm run -s env -- teardown uat --keep-running --logs-since-ms "$LOGS_SINCE_MS" || true'
+                  sh 'npm run -s env -- teardown uat --keep-running $LOG_SCOPE || true'
                 }
               }
             }
