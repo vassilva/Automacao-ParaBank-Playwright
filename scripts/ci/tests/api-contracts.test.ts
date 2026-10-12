@@ -145,3 +145,43 @@ describe('malformed answers and evidence safety', () => {
     assert.ok(!other.includes(SECRET_SSN) && !other.includes('TestAbcd'), 'customer data leaked');
   });
 });
+
+describe('client integration (src/api/parabank-client.ts)', () => {
+  /** A minimal APIRequestContext whose every answer is `body` with HTTP 200. */
+  const fakeRequest = (body: unknown) =>
+    ({
+      fetch: () =>
+        Promise.resolve({
+          ok: () => true,
+          status: () => 200,
+          headers: () => ({}),
+          json: () => (body instanceof Error ? Promise.reject(body) : Promise.resolve(body)),
+          dispose: () => Promise.resolve(),
+        }),
+    }) as unknown as import('@playwright/test').APIRequestContext;
+
+  it('returns validated data for a conforming answer', async () => {
+    const { ParaBankClient } = await import('../../../src/api/parabank-client');
+    const accounts = await new ParaBankClient(fakeRequest([account])).getAccounts(12212);
+    assert.equal(accounts[0]?.id, account.id);
+  });
+
+  it('names the failed call and field, never a value, for a malformed answer', async () => {
+    const { ParaBankClient } = await import('../../../src/api/parabank-client');
+    const client = new ParaBankClient(fakeRequest({ ...customer, ssn: null }));
+    await assert.rejects(
+      () => client.getCustomer(12212),
+      (error: Error) =>
+        error instanceof ContractViolation &&
+        error.message.includes('could not read the customer profile') &&
+        error.message.includes('customer.ssn') &&
+        !error.message.includes('TestAbcd'),
+    );
+  });
+
+  it('reports a non-JSON answer as such', async () => {
+    const { ParaBankClient } = await import('../../../src/api/parabank-client');
+    const client = new ParaBankClient(fakeRequest(new SyntaxError('Unexpected token <')));
+    await assert.rejects(() => client.getTransactions(13344), /the answer is not JSON/);
+  });
+});

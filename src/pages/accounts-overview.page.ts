@@ -1,5 +1,6 @@
 import type { Locator, Page } from '@playwright/test';
 import type { Account } from '../api/types';
+import { parseAccounts } from '../api/contracts';
 
 export interface OverviewRow {
   accountId: string;
@@ -40,7 +41,7 @@ export class AccountsOverviewPage {
       throw new Error(`Accounts overview data failed to load: HTTP ${response.status()}`);
     }
     const customerId = Number(ACCOUNTS_ENDPOINT.exec(new URL(response.url()).pathname)?.[1]);
-    const accounts = (await response.json()) as Account[];
+    const accounts = parseAccounts(await response.json());
     await this.totalRow.waitFor();
     return { customerId, accounts };
   }
