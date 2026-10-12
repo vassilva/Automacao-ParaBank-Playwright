@@ -249,11 +249,22 @@ function identity(environment: EnvironmentName, expected?: string): string {
   return current.imageId;
 }
 
-function saveLog(environment: EnvironmentName): void {
+/**
+ * `sinceMs` (epoch milliseconds, e.g. the Jenkins build start) limits the log to what happened
+ * during this build: the environments are persistent, so a full log would repeat every earlier
+ * build's history in each archive. Without it the whole container log is saved.
+ */
+function saveLog(environment: EnvironmentName, sinceMs?: string): void {
   const dir = path.join(process.env.REPORTS_DIR || 'reports', 'logs');
   mkdirSync(dir, { recursive: true });
+  const since: string[] = [];
+  if (sinceMs !== undefined) {
+    if (!/^\d{12,}$/.test(sinceMs))
+      throw new Error(`--logs-since-ms must be epoch ms, got "${sinceMs}"`);
+    since.push('--since', new Date(Number(sinceMs)).toISOString());
+  }
   const raw = docker(
-    ['compose', 'logs', '--no-color', '--timestamps', 'parabank'],
+    ['compose', 'logs', '--no-color', '--timestamps', ...since, 'parabank'],
     composeEnv(environment),
     false,
     LOG_MAX_BUFFER,
@@ -263,15 +274,16 @@ function saveLog(environment: EnvironmentName): void {
   const safe = redactLog(raw);
   const file = path.join(dir, `${environment}.log`);
   writeFileSync(file, safe);
-  console.log(`Saved redacted ParaBank log: ${file}`);
+  const scope = since.length ? `since ${since[1]}` : 'whole container log';
+  console.log(`Saved redacted ParaBank log: ${file} (${scope})`);
 }
 
-function teardown(environment: EnvironmentName, keepRunning: boolean): void {
+function teardown(environment: EnvironmentName, keepRunning: boolean, logsSinceMs?: string): void {
   const { network, container } = names(environment);
   if (succeeds(['container', 'inspect', container])) {
     // A missing log must not skip the rest of the teardown (detaching the agent's network).
     try {
-      saveLog(environment);
+      saveLog(environment, logsSinceMs);
     } catch (error) {
       console.error(`WARNING: ParaBank log not saved: ${(error as Error).message}`);
     }
@@ -334,7 +346,11 @@ function main(): void {
       return;
     }
     case 'teardown':
-      return teardown(environmentArg(target), rest.includes('--keep-running'));
+      return teardown(
+        environmentArg(target),
+        rest.includes('--keep-running'),
+        optionValue(rest, '--logs-since-ms'),
+      );
     default:
       throw new Error(
         'Usage: environment.ts deploy|start|stop|status|health|identity|teardown <qa|uat> [...]',

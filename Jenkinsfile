@@ -654,13 +654,16 @@ pipeline {
           junit testResults: 'reports/qa/**/cucumber-junit.xml, reports/uat/**/cucumber-junit.xml, reports/uat/**/junit.xml', allowEmptyResults: true
           script {
             if (env.PIPELINE_LOCK_HELD == 'true' && fileExists('node_modules')) {
-              // QA and UAT stay running (persistent environments). Their logs are saved redacted and
+              // QA and UAT stay running (persistent environments). Their logs since this build
+              // started are saved redacted (not their whole history, repeated in every archive) and
               // the agent is detached from their networks.
-              if (env.DEPLOYS_QA == 'true') {
-                sh 'npm run -s env -- teardown qa --keep-running || true'
-              }
-              if (env.UAT_PROMOTION_VERIFIED == 'true') {
-                sh 'npm run -s env -- teardown uat --keep-running || true'
+              withEnv(["LOGS_SINCE_MS=${currentBuild.startTimeInMillis}"]) {
+                if (env.DEPLOYS_QA == 'true') {
+                  sh 'npm run -s env -- teardown qa --keep-running --logs-since-ms "$LOGS_SINCE_MS" || true'
+                }
+                if (env.UAT_PROMOTION_VERIFIED == 'true') {
+                  sh 'npm run -s env -- teardown uat --keep-running --logs-since-ms "$LOGS_SINCE_MS" || true'
+                }
               }
             }
             // Human-readable pointers; identity is always the image ID.

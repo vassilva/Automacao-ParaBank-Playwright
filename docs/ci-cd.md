@@ -517,6 +517,8 @@ Reports are separated per environment and suite: `reports/qa/smoke` (PR, push),
 `reports/qa/impacted` (PR, `qa/*`; with `selection.json`),
 `reports/qa/regression` (main), `reports/qa/<sanity|full>` (optional), `reports/uat/smoke`,
 `reports/uat/known-defects` (optional), plus `reports/logs/qa.log` and `reports/logs/uat.log`.
+The container logs cover this build only (`--logs-since-ms` = the build start): QA and UAT are
+persistent, so a whole log would repeat every earlier build's history in each archive.
 Published: JUnit of every run; archived: the reports, the redacted container logs, the application
 build log and provenance record (`build/`), and the deployment record (`deployment/`). Failure
 messages, attachments and Playwright step titles are redacted, screenshots are masked before
