@@ -532,6 +532,13 @@ Reports are separated per environment and suite: `reports/qa/smoke` (PR, push),
 `reports/qa/impacted` (PR, `qa/*`; with `selection.json`),
 `reports/qa/regression` (main), `reports/qa/<sanity|full>` (optional), `reports/uat/smoke`,
 `reports/uat/known-defects` (optional), plus `reports/logs/qa.log` and `reports/logs/uat.log`.
+Container log scope (`scripts/log-capture.ts`): a build that is still SUCCESS at teardown archives
+only its own window (`--logs-since-ms` = the build start), because QA and UAT are persistent and a
+whole log would repeat every earlier build; a FAILURE, UNSTABLE or ABORTED build archives the whole
+log, so a fault that began before the build is kept. An invalid or future start, or an empty
+window, falls back to the whole log with a warning. Every path is redacted. (The result is read in
+the agent block's `post`, where it is already final for every stage of that block; the later
+"Validation Complete" stage only checks flags.)
 Published: JUnit of every run; archived: the reports, the redacted container logs, the application
 build log and provenance record (`build/`), and the deployment record (`deployment/`). Failure
 messages, attachments and Playwright step titles are redacted, screenshots are masked before
