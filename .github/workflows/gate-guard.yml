@@ -145,6 +145,28 @@ jobs:
               -f description="$description" >/dev/null
             echo "PR #$pr $sha: gate=$gate reviewed=$reviewed autoMerge=$auto jenkins=$jenkins -> gate-review=$state ($description)"
 
+            # The human step, explained on the PR itself, once per PR (found again by its marker).
+            # Best effort: a failure here never changes gate-review. A comment is never a review.
+            if [ "$gate" = "true" ] && [ "$reviewed" != "true" ]; then
+              marker='<!-- gate-review-instructions -->'
+              if comments=$(gh api --paginate "repos/$REPO/issues/$pr/comments" --jq '.[].body' 2>/dev/null) \
+                && ! grep -qF "$marker" <<< "$comments"; then
+                {
+                  echo "$marker"
+                  echo "**This PR changes gate-defining files: it needs the repository owner's review of its latest commit.**"
+                  echo ""
+                  echo "1. Open [Files changed](https://github.com/$REPO/pull/$pr/files) and click **Review changes**."
+                  echo "2. Choose **Comment** (GitHub does not let you approve your own PR)."
+                  echo "3. Write a line reading gate-reviewed and click **Submit review**."
+                  echo ""
+                  echo "The \`$REVIEW_LABEL\` label is managed automatically: it is set after that review and removed when a new commit arrives (then review again). A label added by hand is removed. Passing CI never authorizes this PR."
+                } > "$RUNNER_TEMP/howto.md"
+                gh pr comment "$pr" -R "$REPO" --body-file "$RUNNER_TEMP/howto.md" >/dev/null \
+                  && echo "Posted the review instructions on PR #$pr." \
+                  || echo "Could not post the review instructions (gate-review unaffected)."
+              fi
+            fi
+
             if [ "$gate" = "true" ] && [ "$auto" = "true" ] && [ "$ACTION" = "auto_merge_enabled" ]; then
               {
                 echo "Auto-merge is not allowed on this PR: it changes gate-defining files."
