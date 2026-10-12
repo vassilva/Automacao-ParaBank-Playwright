@@ -51,14 +51,34 @@ function baseUrl(environment: EnvironmentName): string {
     : localBaseUrl(environment);
 }
 
-function docker(args: string[], env: Record<string, string> = {}, quiet = false): string {
+/**
+ * QA and UAT are persistent, so their container logs grow with every run (several MB). Node's
+ * default spawnSync buffer (1 MiB) kills the reader when it overflows (ENOBUFS); on the Linux agent
+ * the Compose CLI then reported its own exit code (255, 130) instead of the real cause.
+ */
+const LOG_MAX_BUFFER = 256 * 1024 * 1024;
+
+function docker(
+  args: string[],
+  env: Record<string, string> = {},
+  quiet = false,
+  maxBuffer?: number,
+): string {
   const result = spawnSync('docker', args, {
     encoding: 'utf8',
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', quiet ? 'pipe' : 'inherit'],
+    maxBuffer,
   });
-  if (result.status !== 0) {
-    throw new Error(`docker ${args.slice(0, 3).join(' ')} failed (exit ${result.status})`);
+  if (result.status !== 0 || result.error) {
+    const errorCode =
+      result.error && 'code' in result.error ? String(result.error.code) : undefined;
+    const cause = errorCode
+      ? `error ${errorCode}`
+      : result.signal
+        ? `signal ${result.signal}`
+        : `exit ${result.status}`;
+    throw new Error(`docker ${args.slice(0, 3).join(' ')} failed (${cause})`);
   }
   return result.stdout.trim();
 }
@@ -157,7 +177,10 @@ function waitUntilHealthy(environment: EnvironmentName): Status {
 function databaseInitialized(environment: EnvironmentName): boolean {
   const { container } = names(environment);
   const started = docker(['container', 'inspect', '--format', '{{.State.StartedAt}}', container]);
-  const logs = spawnSync('docker', ['logs', '--since', started, container], { encoding: 'utf8' });
+  const logs = spawnSync('docker', ['logs', '--since', started, container], {
+    encoding: 'utf8',
+    maxBuffer: LOG_MAX_BUFFER,
+  });
   const text = `${logs.stdout}${logs.stderr}`;
   // Called after a complete home-page request: a fresh database logs "not yet initialized" on that
   // request and is ready once "Database initialized" follows; a database kept across a restart
@@ -232,6 +255,8 @@ function saveLog(environment: EnvironmentName): void {
   const raw = docker(
     ['compose', 'logs', '--no-color', '--timestamps', 'parabank'],
     composeEnv(environment),
+    false,
+    LOG_MAX_BUFFER,
   );
   // ParaBank logs customers in clear text (usernames, passwords, SSNs): redacted line by line, and
   // any line that still looks like a credential is withheld (scripts/log-redaction.ts).
@@ -243,7 +268,14 @@ function saveLog(environment: EnvironmentName): void {
 
 function teardown(environment: EnvironmentName, keepRunning: boolean): void {
   const { network, container } = names(environment);
-  if (succeeds(['container', 'inspect', container])) saveLog(environment);
+  if (succeeds(['container', 'inspect', container])) {
+    // A missing log must not skip the rest of the teardown (detaching the agent's network).
+    try {
+      saveLog(environment);
+    } catch (error) {
+      console.error(`WARNING: ParaBank log not saved: ${(error as Error).message}`);
+    }
+  }
   if (inContainer && succeeds(['network', 'inspect', network])) {
     const attached = docker(['network', 'inspect', network, '--format', '{{json .Containers}}']);
     if (attached.includes(hostname()))

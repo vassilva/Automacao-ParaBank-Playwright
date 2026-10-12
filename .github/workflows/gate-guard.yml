@@ -5,9 +5,9 @@ name: Gate-defining change guard
 # (.github/gate-defining-paths.json) it is "success" only after a human review (label
 # gate-change-reviewed) and after Jenkins passed on that exact commit; ordinary PRs get "success"
 # (the Jenkins checks still gate them). Every merge into main is a manual merge by the repository
-# owner: auto-merge is disabled for the repository and a "restrict updates" ruleset lets only
-# repository admins update main, via a pull request (docs/ci-cd.md). The guard never merges and
-# cannot: it has no write access to code.
+# owner: auto-merge is disabled for the repository, ruleset 24842741 admits changes to main only
+# through a pull request, and the owner is the only collaborator (docs/ci-cd.md). The guard never
+# merges and cannot: it has no write access to code.
 #
 # Defense in depth: should auto-merge ever be re-enabled, "gate-review" is "failure" on a
 # gate-defining PR while auto-merge is enabled on it. (Turning auto-merge off from here is not

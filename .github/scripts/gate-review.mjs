@@ -2,7 +2,8 @@
 // plus a small CLI; the workflow runs this file from main, never from the PR.
 //
 // Policy (docs/ci-cd.md): every merge into main is a manual merge by the repository owner (auto-merge
-// is disabled for the repository; a "restrict updates" ruleset admits only admins, via a PR). A PR
+// is disabled for the repository; ruleset 24842741 admits changes to main only via a PR, and the
+// owner is the only collaborator). A PR
 // that changes a gate-defining file (.github/gate-defining-paths.json) is judged by the checks it
 // modifies, so it also needs a human review:
 //   - never mergeable without the review label;
