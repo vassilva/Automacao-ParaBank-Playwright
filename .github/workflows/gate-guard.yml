@@ -2,8 +2,9 @@ name: Gate-defining change guard
 
 # Sets the required commit status "gate-review" on every PR head (decision:
 # .github/scripts/gate-review.mjs). For a PR that changes a gate-defining file
-# (.github/gate-defining-paths.json) it is "success" only after a human review (label
-# gate-change-reviewed) and after Jenkins passed on that exact commit; ordinary PRs get "success"
+# (.github/gate-defining-paths.json) it is "success" only after an owner review of that exact
+# commit (a pull request review with a line "gate-reviewed"; the guard then sets the label
+# gate-change-reviewed) and after Jenkins passed on that commit; ordinary PRs get "success"
 # (the Jenkins checks still gate them). Every merge into main is a manual merge by the repository
 # owner: auto-merge is disabled for the repository, ruleset 24842741 admits changes to main only
 # through a pull request, and the owner is the only collaborator (docs/ci-cd.md). The guard never
@@ -35,6 +36,13 @@ on:
   # Jenkins posts continuous-integration/jenkins/pr-head when a PR build starts and finishes: the
   # status is re-evaluated so that it becomes "success" only after Jenkins passed.
   status:
+  # Re-evaluation after a pull request review (.github/workflows/gate-review-dispatch.yml). Only a
+  # PR number comes in; the head, the files, the reviews and the checks are read from the API here.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to re-evaluate
+        required: true
 
 permissions:
   contents: read
@@ -42,7 +50,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: gate-guard-${{ github.event.pull_request.number || github.event.sha }}
+  group: gate-guard-${{ github.event.pull_request.number || inputs.pr || github.event.sha }}
   cancel-in-progress: false
 
 env:
@@ -72,7 +80,7 @@ jobs:
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           ACTION: ${{ github.event.action }}
-          EVENT_PR: ${{ github.event.pull_request.number }}
+          EVENT_PR: ${{ github.event.pull_request.number || inputs.pr }}
           EVENT_SHA: ${{ github.event.pull_request.head.sha || github.event.sha }}
         run: |
           set -euo pipefail
@@ -80,6 +88,11 @@ jobs:
           if [ "$EVENT" = "status" ]; then
             prs=$(gh api "repos/$REPO/commits/$EVENT_SHA/pulls" \
               --jq '[.[] | select(.state=="open" and .base.ref=="main" and .head.sha=="'"$EVENT_SHA"'") | .number] | join(" ")')
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
+            [[ "$EVENT_PR" =~ ^[0-9]+$ ]] || { echo "Invalid PR number."; exit 1; }
+            EVENT_SHA=$(gh api "repos/$REPO/pulls/$EVENT_PR" \
+              --jq 'select(.state == "open" and .base.ref == "main") | .head.sha')
+            prs=""; [ -n "$EVENT_SHA" ] && prs="$EVENT_PR"
           else
             prs="$EVENT_PR"
           fi
@@ -103,14 +116,20 @@ jobs:
               });
             ')
 
-            # A new commit needs a new review.
-            if [ "$gate" = "true" ] && [ "$ACTION" = "synchronize" ]; then
-              if gh api -X DELETE "repos/$REPO/issues/$pr/labels/$REVIEW_LABEL" >/dev/null 2>&1; then
-                echo "Removed $REVIEW_LABEL: the new commit has not been reviewed."
-              fi
+            # The review signal: an owner review of exactly this commit (gate-review.mjs,
+            # reviewedAtHead); a new commit leaves earlier reviews on an older commit. Passing
+            # checks are never a review. The label only shows the state: the guard sets and removes
+            # it, so a label added by hand without such a review is removed again.
+            gh api --paginate "repos/$REPO/pulls/$pr/reviews" --jq '.[]' | jq -s . > "$RUNNER_TEMP/reviews.json"
+            reviewed=$(node .github/scripts/gate-review.mjs --reviewed-at-head "$RUNNER_TEMP/reviews.json" "$sha")
+            labeled=$(gh api "repos/$REPO/issues/$pr/labels" --jq "any(.[]; .name == \"$REVIEW_LABEL\")")
+            if [ "$gate" = "true" ] && [ "$reviewed" = "true" ] && [ "$labeled" = "false" ]; then
+              gh api -X POST "repos/$REPO/issues/$pr/labels" -f "labels[]=$REVIEW_LABEL" >/dev/null
+              echo "Set $REVIEW_LABEL: owner review of $sha."
+            elif [ "$labeled" = "true" ] && [ "$reviewed" != "true" ]; then
+              gh api -X DELETE "repos/$REPO/issues/$pr/labels/$REVIEW_LABEL" >/dev/null
+              echo "Removed $REVIEW_LABEL: no owner review of $sha."
             fi
-
-            reviewed=$(gh api "repos/$REPO/issues/$pr/labels" --jq "any(.[]; .name == \"$REVIEW_LABEL\")")
             auto=$(gh pr view "$pr" -R "$REPO" --json autoMergeRequest --jq '.autoMergeRequest != null')
             status_ok=$(gh api "repos/$REPO/commits/$sha/status" \
               --jq "any(.statuses[]; .context == \"$JENKINS_STATUS\" and .state == \"success\")")
@@ -130,7 +149,7 @@ jobs:
               {
                 echo "Auto-merge is not allowed on this PR: it changes gate-defining files."
                 echo "The required \`gate-review\` status stays failing while auto-merge is enabled."
-                echo "Disable auto-merge; after review (label \`$REVIEW_LABEL\`) and a passing Jenkins"
+                echo "Disable auto-merge; after an owner review of the head commit with a line \`gate-reviewed\` and a passing Jenkins"
                 echo "check, merge it manually. See docs/ci-cd.md."
               } > "$RUNNER_TEMP/comment.md"
               gh pr comment "$pr" -R "$REPO" --body-file "$RUNNER_TEMP/comment.md" >/dev/null

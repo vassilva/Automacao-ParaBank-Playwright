@@ -120,29 +120,44 @@ only when `success`; requiring both signals closes that gap. A missing signal bl
 
 ### gate-review: human review for gate-defining changes
 
-`.github/workflows/gate-guard.yml` runs from `main` (`pull_request_target`, and `status` when
-Jenkins reports `pr-head`; a PR cannot change it) and sets the required status `gate-review` with
-`.github/scripts/gate-review.mjs`:
+`.github/workflows/gate-guard.yml` runs from `main` (`pull_request_target`; `status` when Jenkins
+reports `pr-head`; `workflow_dispatch` from `gate-review-dispatch.yml` when a review is submitted,
+edited or dismissed; a PR cannot change it) and sets the required status `gate-review` with
+`.github/scripts/gate-review.mjs`.
 
-| PR                                                                                             | review label `gate-change-reviewed` | Jenkins on this commit | `gate-review`          |
-| ---------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------- | ---------------------- |
-| ordinary                                                                                       | –                                   | –                      | success                |
-| gate-defining                                                                                  | absent                              | any                    | failure (needs review) |
-| gate-defining                                                                                  | present                             | not yet passed         | pending                |
-| gate-defining                                                                                  | present                             | passed                 | success                |
-| guard cannot read the PR (API, permission)                                                     | –                                   | –                      | failure (fail closed)  |
-| gate-defining with auto-merge enabled (defense in depth, should auto-merge ever be re-enabled) | any                                 | any                    | failure                |
+**The review signal** is a pull request review by the repository owner **on the current head
+commit** (GitHub records the commit, `commit_id`) whose body has a line reading exactly
+`gate-reviewed`. On your own PR, use **Files changed → Review changes → Comment** (GitHub refuses
+a self-approval, HTTP 422 "Can not approve your own pull request"; a Comment review is accepted,
+verified on PR #11). The guard then sets the label `gate-change-reviewed` itself, and removes it
+when the head moves on or when the label was added without such a review: the label shows the
+state, it is no longer the signal. Passing checks never count as a review.
+
+| PR                                                                                             | owner review with `gate-reviewed` on this commit | Jenkins on this commit | `gate-review`          |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------ | ---------------------- | ---------------------- |
+| ordinary                                                                                       | –                                                | –                      | success                |
+| gate-defining                                                                                  | none (or only on an older commit)                | any                    | failure (needs review) |
+| gate-defining                                                                                  | yes                                              | not yet passed         | pending                |
+| gate-defining                                                                                  | yes                                              | passed                 | success                |
+| guard cannot read the PR or its reviews (API, permission)                                      | –                                                | –                      | failure (fail closed)  |
+| gate-defining with auto-merge enabled (defense in depth, should auto-merge ever be re-enabled) | any                                              | any                    | failure                |
+
+`gate-review-dispatch.yml` runs in the PR's context (`pull_request_review` uses the PR's workflow
+file), so it decides nothing: it only passes the PR number to the guard on `main`, with
+`actions: write` and no other permission. Removing or breaking it leaves `gate-review` failing.
 
 Gate-defining files are listed in `.github/gate-defining-paths.json` (Jenkinsfile, `scripts/ci/**`,
 `.github/**`, ruleset files, redaction and test-data controls, runner configuration and
-dependencies, the Playwright adapter, the CI agent image, lint and format configuration). Every new
-commit removes the label. **Permission finding:** the earlier guard tried to turn auto-merge off and
+dependencies, the Playwright adapter, the CI agent image, lint and format configuration). A new
+commit invalidates every earlier review. **Permission finding:** the earlier guard tried to turn auto-merge off and
 GitHub answered "Resource not accessible by integration (disablePullRequestAutoMerge)": that
 mutation needs `contents: write`, which this `pull_request_target` workflow deliberately does not
 get. The obsolete operation was removed; protection comes from the required status, the disabled
 auto-merge and the checks ruleset `24842741`, not from a token permission. Residual limit: anyone
-with write access (today only the owner) can add the label or write a workflow that posts a
-`gate-review` status; this protects against unattended changes, not against a malicious admin.
+holding the owner's credentials (the owner, or a tool or agent using the owner's token) can submit
+the review, and anyone with write access can write a workflow that posts a `gate-review` status;
+this protects against unattended and stale changes, not against a malicious admin or a leaked
+token.
 
 ### Jenkins job and GitHub discovery
 
