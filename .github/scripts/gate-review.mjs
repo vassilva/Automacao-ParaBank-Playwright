@@ -55,7 +55,7 @@ export function decideGateReview({
   if (!reviewed) {
     return {
       state: 'failure',
-      description: `Gate-defining change: needs an owner review of this commit with a line "gate-reviewed" (then ${label} is set)`,
+      description: `Owner: Files changed > Review changes > Comment, with a line "gate-reviewed" (${label} is then set)`,
     };
   }
   if (!jenkinsPassed) {
@@ -81,7 +81,8 @@ export function reviewedAtHead(reviews, headSha, phrase = 'gate-reviewed') {
   if (!Array.isArray(reviews) || typeof headSha !== 'string' || !/^[0-9a-f]{40}$/.test(headSha)) {
     return undefined;
   }
-  const line = new RegExp(`^\\s*${phrase}\\s*$`, 'm');
+  // The phrase alone on a line; code formatting (`gate-reviewed`) and letter case are tolerated.
+  const line = new RegExp(`^\\s*\`?${phrase}\`?\\s*$`, 'im');
   return reviews.some(
     (r) =>
       r !== null &&

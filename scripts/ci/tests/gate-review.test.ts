@@ -243,3 +243,65 @@ describe('guard and dispatch workflows (static checks)', () => {
     assert.doesNotMatch(dispatch, /actions\/checkout/);
   });
 });
+
+describe('review phrase forms and PR guidance', () => {
+  const HEAD = 'c'.repeat(40);
+  const review = (body: string) => ({
+    user: { login: 'owner' },
+    author_association: 'OWNER',
+    state: 'COMMENTED',
+    commit_id: HEAD,
+    body,
+  });
+
+  it('accepts the phrase line copied as code or in another letter case', async () => {
+    const { reviewedAtHead } = await load();
+    for (const body of [
+      '`gate-reviewed`',
+      'Gate-Reviewed',
+      'Looked at the diff.\n  `gate-reviewed`  ',
+    ]) {
+      assert.equal(reviewedAtHead([review(body)], HEAD), true, JSON.stringify(body));
+    }
+  });
+
+  it('still requires the phrase alone on its line', async () => {
+    const { reviewedAtHead } = await load();
+    for (const body of [
+      'ok gate-reviewed',
+      '`gate-reviewed` later',
+      'gate-reviewed!',
+      '``gate-reviewed``',
+    ]) {
+      assert.equal(reviewedAtHead([review(body)], HEAD), false, JSON.stringify(body));
+    }
+  });
+
+  it('the failure status tells the owner exactly what to do', async () => {
+    const { decideGateReview } = await load();
+    const d = decideGateReview({
+      gateDefining: true,
+      reviewed: false,
+      autoMergeEnabled: false,
+      jenkinsPassed: true,
+      label,
+    });
+    assert.equal(d.state, 'failure');
+    assert.match(d.description, /Review changes > Comment/);
+    assert.match(d.description, /gate-reviewed/);
+    assert.ok(
+      d.description.length <= 140,
+      'GitHub truncates status descriptions at 140 characters',
+    );
+  });
+
+  it('the guard posts the instructions once, best effort, and never decides from comments', () => {
+    const guard = readFileSync('.github/workflows/gate-guard.yml', 'utf8');
+    assert.match(guard, /<!-- gate-review-instructions -->/);
+    assert.match(guard, /grep -qF "\$marker"/);
+    assert.match(guard, /\|\| echo "Could not post the review instructions/);
+    // The decision input comes only from the reviews API.
+    assert.match(guard, /reviewed=\$\(node \.github\/scripts\/gate-review\.mjs --reviewed-at-head/);
+    assert.doesNotMatch(guard, /reviewed=.*issues\/\$pr\/comments/);
+  });
+});
