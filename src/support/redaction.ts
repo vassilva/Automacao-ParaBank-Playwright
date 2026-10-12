@@ -17,7 +17,19 @@ const PATTERNS: [RegExp, string][] = [
   // Servlet session ids in URLs (ParaBank rewrites URLs with ;jsessionid=...) and cookies.
   [/(jsessionid=)[^;?&#\s"'/\\]+/gi, `$1${MASK}`],
   // Credential and identity parameters in query strings and form bodies.
-  [/\b((?:customer\.)?(?:password|repeatedPassword|username|ssn)=)[^&\s"']*/gi, `$1${MASK}`],
+  [/\b((?:customer\.)?(?:password|repeatedPassword|username|ssn)=)[^&\s"']+/gi, `$1${MASK}`],
+  // The same fields as JSON, quoted or spaced values (e.g. a response body in an error message).
+  [/("(?:password|repeatedPassword|username|ssn)"\s*:\s*")[^"]*/gi, `$1${MASK}`],
+  [
+    /\b(password|repeatedPassword|username|ssn)(\s*[=:]\s*)(["']?)[^\s"'&,;)\]]+/gi,
+    `$1$2$3${MASK}`,
+  ],
+  // Tokens and keys (not used by ParaBank today; defense in depth).
+  [
+    /\b((?:access_|refresh_|id_)?token|x-api-key|api[_-]?key|client[_-]?secret)(\s*[=:]\s*)(["']?)[^\s"'&,;)\]]+/gi,
+    `$1$2$3${MASK}`,
+  ],
+  [/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/g, `$1 ${MASK}`],
   // The synthetic SSN range used by this suite (000-xx-xxxx), wherever it appears.
   [/\b000-\d{2}-\d{4}\b/g, MASK],
   // Shapes of the credentials src/factories/customer.factory.ts generates (password "Pw" + 16
