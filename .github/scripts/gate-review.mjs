@@ -6,12 +6,14 @@
 // owner is the only collaborator). A PR
 // that changes a gate-defining file (.github/gate-defining-paths.json) is judged by the checks it
 // modifies, so it also needs a human review:
-//   - never mergeable without the review label;
+//   - never mergeable without an owner review of the current head commit (reviewedAtHead); the
+//     `gate-change-reviewed` label is set and removed by the guard to show that state;
 //   - "success" only as the LAST required signal: after Jenkins passed on this exact head commit;
 //   - defense in depth: "failure" while auto-merge is enabled on it, should auto-merge ever be
 //     re-enabled for the repository.
 // Any missing or unreadable input makes the status "failure" (fail closed).
 // Ordinary PRs: "success" (the Jenkins checks still gate the merge).
+import { readFileSync } from 'node:fs';
 import process from 'node:process';
 
 /**
@@ -53,7 +55,7 @@ export function decideGateReview({
   if (!reviewed) {
     return {
       state: 'failure',
-      description: `Gate-defining change: needs human review (label ${label})`,
+      description: `Gate-defining change: needs an owner review of this commit with a line "gate-reviewed" (then ${label} is set)`,
     };
   }
   if (!jenkinsPassed) {
@@ -63,6 +65,33 @@ export function decideGateReview({
     };
   }
   return { state: 'success', description: 'Gate-defining change reviewed; merge manually' };
+}
+
+/**
+ * The human review signal for a gate-defining PR, bound to one commit: a pull request review
+ * (GitHub's own record: reviewer, association, state and the commit it applies to) by the
+ * repository owner, on exactly the current head, whose body has a line reading exactly
+ * `gate-reviewed`. An owner can submit a "Comment" review on their own PR (GitHub refuses a
+ * self-approval), so this works with a single maintainer. A new commit leaves every earlier review
+ * on an older commit_id: a stale review never authorizes a newer commit. CI results are not an
+ * input: passing checks never count as a review.
+ * Returns undefined (fail closed in decideGateReview) when the input cannot be trusted.
+ */
+export function reviewedAtHead(reviews, headSha, phrase = 'gate-reviewed') {
+  if (!Array.isArray(reviews) || typeof headSha !== 'string' || !/^[0-9a-f]{40}$/.test(headSha)) {
+    return undefined;
+  }
+  const line = new RegExp(`^\\s*${phrase}\\s*$`, 'm');
+  return reviews.some(
+    (r) =>
+      r !== null &&
+      typeof r === 'object' &&
+      r.commit_id === headSha &&
+      (r.state === 'COMMENTED' || r.state === 'APPROVED') &&
+      r.author_association === 'OWNER' &&
+      typeof r.body === 'string' &&
+      line.test(r.body),
+  );
 }
 
 /** Gate-defining paths among the changed ones, with main's pattern list. */
@@ -80,8 +109,18 @@ function parseInput(text) {
   }
 }
 
-// CLI used by the workflow: reads a JSON object from argv[2], prints "state<TAB>description".
-if (process.argv[1]?.endsWith('gate-review.mjs') && process.argv[2]) {
+// CLI used by the workflow:
+//   --reviewed-at-head <reviews.json> <head sha>  prints true, false or unknown (fail closed);
+//   <json>                                         prints "state<TAB>description".
+if (process.argv[1]?.endsWith('gate-review.mjs') && process.argv[2] === '--reviewed-at-head') {
+  let result;
+  try {
+    result = reviewedAtHead(JSON.parse(readFileSync(process.argv[3], 'utf8')), process.argv[4]);
+  } catch {
+    result = undefined;
+  }
+  process.stdout.write(`${result === undefined ? 'unknown' : String(result)}\n`);
+} else if (process.argv[1]?.endsWith('gate-review.mjs') && process.argv[2]) {
   const input = parseInput(process.argv[2]);
   const { state, description } = decideGateReview({ label: 'gate-change-reviewed', ...input });
   process.stdout.write(`${state}\t${description}\n`);
