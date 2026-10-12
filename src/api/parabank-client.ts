@@ -7,6 +7,7 @@ export type ResponseObserver = (method: string, response: APIResponse) => void;
 import type { CustomerProfile } from '../factories/customer.factory';
 import type { Payee } from '../factories/payee.factory';
 import { toAmountInput, type Cents } from '../utils/money';
+import { parseAccount, parseAccounts, parseCustomer, parseTransactions } from './contracts';
 import type { Account, Customer, OpenableAccountType, Transaction } from './types';
 
 const ACCOUNT_TYPE_CODES: Record<OpenableAccountType, number> = { CHECKING: 0, SAVINGS: 1 };
@@ -93,7 +94,11 @@ export class ParaBankClient {
   }
 
   async getAccounts(customerId: number): Promise<Account[]> {
-    return this.json<Account[]>(await this.accountsResponse(customerId), 'list customer accounts');
+    return this.json(
+      await this.accountsResponse(customerId),
+      'list customer accounts',
+      parseAccounts,
+    );
   }
 
   /** Raw response, for checks about who may read the accounts (e.g. after signing out). */
@@ -109,14 +114,14 @@ export class ParaBankClient {
       `services_proxy/bank/accounts/${accountId}/transactions`,
       { headers: JSON_HEADERS },
     );
-    return this.json<Transaction[]>(response, 'list account transactions');
+    return this.json(response, 'list account transactions', parseTransactions);
   }
 
   async getCustomer(customerId: number): Promise<Customer> {
     const response = await this.send('GET', `services_proxy/bank/customers/${customerId}`, {
       headers: JSON_HEADERS,
     });
-    return this.json<Customer>(response, 'read the customer profile');
+    return this.json(response, 'read the customer profile', parseCustomer);
   }
 
   async openAccount(
@@ -128,7 +133,7 @@ export class ParaBankClient {
       headers: JSON_HEADERS,
       params: { customerId, newAccountType: ACCOUNT_TYPE_CODES[type], fromAccountId },
     });
-    return this.json<Account>(response, 'open an account');
+    return this.json(response, 'open an account', (value) => parseAccount(value));
   }
 
   async transfer(fromAccountId: number, toAccountId: number, amount: Cents): Promise<void> {
@@ -219,9 +224,20 @@ export class ParaBankClient {
     return response;
   }
 
-  private async json<T>(response: APIResponse, action: string): Promise<T> {
+  /** Parses and validates the body (./contracts.ts): a malformed answer fails here, by field. */
+  private async json<T>(
+    response: APIResponse,
+    action: string,
+    parse: (value: unknown) => T,
+  ): Promise<T> {
     await this.expectOk(response, action);
-    return (await response.json()) as T;
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new Error(`ParaBank could not ${action}: the answer is not JSON`);
+    }
+    return parse(body);
   }
 
   private async expectOk(response: APIResponse, action: string): Promise<void> {

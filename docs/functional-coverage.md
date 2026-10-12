@@ -264,6 +264,19 @@ not taken: Account Activity month/type filters and the transaction details page 
 transactions already verified through the API), and the admin/database endpoints (they change
 shared global state).
 
+**Runtime response contracts** (`src/api/contracts.ts`): every JSON answer the client reads is
+validated where it is parsed, instead of being trusted through a type cast: accounts (ids,
+`CHECKING`/`SAVINGS`/`LOAN`, finite balance), transactions (ids, `Debit`/`Credit`, date, amount,
+description; transfers and loan fundings are verified through these postings), and the customer
+(ids, names, address, phone, SSN). Missing, null, wrongly typed or malformed fields fail at once
+with a `ContractViolation` naming the field path and JSON type, never a value. Extra fields are
+allowed. A violation is a transport failure, not an outcome check, so it can never count as a
+known-defect reproduction. Unit tests: `scripts/ci/tests/api-contracts.test.ts` (Quality Gates).
+Verified on QA: Full 52/52 and the 25 known defects reproduced through their proofs with the
+contracts active. Loan decisions themselves are read from the UI and the resulting accounts; the
+client does not parse the `requestLoan` answer. A consumer-driven contract tool (Pact) is not used:
+there is no separate provider team.
+
 ## Artifact classification (sensitive data)
 
 | Artifact                                                                  | Can contain                                                                           | Protection                                                                                                                                                            | Class                                                                 |
