@@ -1,4 +1,4 @@
-# CI/CD: PR Smoke, manual merge, QA Regression, automatic UAT promotion, UAT Smoke
+# CI/CD: PR Smoke, manual merge, QA Regression, manual UAT approval, UAT Smoke
 
 One `Jenkinsfile`, one **Multibranch Pipeline**, one pipeline at a time (held in the Jenkins queue,
 see "Scheduling"). The definitive flow:
@@ -6,10 +6,11 @@ see "Scheduling"). The definitive flow:
 ```
 LOCAL DEVELOPMENT (tests written and run against QA) ─> PUSH TO A FEATURE BRANCH ─> PULL REQUEST
   ─> QUALITY GATES ─> QA SMOKE (4)                     = the required checks (failures block)
-  ─> MANUAL MERGE by the repository owner in GitHub    (no auto-merge, no automation merges)
+  ─> MANUAL MERGE in GitHub                           (no auto-merge, no automation merges)
   ─> QA REGRESSION (24, once, on QA)                   = the gate before UAT
-  ─> AUTOMATIC UAT PROMOTION of the validated image    (no manual approval)
-  ─> UAT SMOKE (4) ─> SUCCESS
+  ─> MANUAL UAT APPROVAL in Jenkins                    (authorized operator only; reject,
+                                                        timeout or abort: nothing deployed)
+  ─> UAT PROMOTION of the validated image ─> UAT SMOKE (4) ─> SUCCESS
 ```
 
 ```
@@ -24,6 +25,7 @@ PULL REQUEST (CI)  QUALITY GATES ─> CONFIG CHECK ─> APP IMAGE ─> QA READY 
                    = the "Jenkins" check + "pr-head" status. Never Regression, never UAT.
 
 MAIN (CD)          QUALITY GATES ─> APP IMAGE ─> QA READY ─> QA REGRESSION (24, once)
+                     ─> UAT APPROVAL (Jenkins input, PARABANK_UAT_APPROVERS only, bounded wait)
                      ─> UAT PROMOTION (main's head, image ID, revision, inputs digest; fail-closed)
                      ─> DEPLOY UAT (only if UAT does not already run that image ID)
                      ─> UAT READY (identity = validated image) ─> UAT SMOKE (4)
@@ -37,8 +39,12 @@ EVERY BUILD: QUEUED while another build of the job is active (queue dispatcher) 
 ```
 
 ```
-QA REGRESSION ──fail / skipped──> FAILURE (no UAT stage runs)
+QA REGRESSION ──fail / skipped──> FAILURE (no approval is requested, no UAT stage runs)
       │ 24/24
+      ▼
+UAT APPROVAL ──reject / timeout / abort──> ABORTED (nothing deployed, no deployment record)
+      │       ──approver not authorized / allow-list not configured──> FAILURE (nothing deployed)
+      │ approved by an authorized operator
       ▼
 UAT PROMOTION ──main moved on──> ABORTED "SUPERSEDED" (a newer main build promotes)
       │       ──head unreadable / image ID, revision or digest mismatch──> FAILURE (nothing deployed)
@@ -51,7 +57,8 @@ DEPLOY UAT (if needed) ─> UAT READY ─> UAT SMOKE ──fail──> FAILURE (
 
 A Pull Request never runs the Regression suite and never deploys to UAT. `main` runs QA Regression
 exactly once per promotion attempt, no QA Smoke and no UAT Regression; it is SUCCESS only when QA
-Regression, the promotion checks, UAT readiness and UAT Smoke all passed (Validation Complete).
+Regression, the manual UAT approval, the promotion checks, UAT readiness and UAT Smoke all passed
+(Validation Complete). Nothing reaches UAT without a human approval in Jenkins.
 
 **UAT promotion policy (deterministic):** after a passing Regression, UAT is deployed **only if it
 does not already run the exact validated image ID** (healthy). A test-only or documentation merge
@@ -63,43 +70,29 @@ Regression gate always runs.
 ## Merge policy and GitHub protection
 
 Repository: https://github.com/vassilva/Automacao-ParaBank-Playwright (public, owned by a user
-account; `main` is the default branch). Every merge into `main` is a **manual merge by the
-repository owner in the GitHub interface**, after the required checks passed. Nothing merges
-automatically.
+account; `main` is the default branch). **Every merge is manual**, by a person in the GitHub
+interface, once the required checks passed. Auto-merge is disabled for the repository and nothing
+merges automatically. There is **no file-based special review**: every PR is gated by the same
+required CI checks.
 
-| Control                | Setting (verified through the GitHub API)                                                                                                                                                                                                                                                        |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Auto-merge             | **disabled** for the repository (`allow_auto_merge: false`): it cannot be enabled on any PR                                                                                                                                                                                                      |
-| Ruleset `24842741`     | [`github-ruleset-main.json`](github-ruleset-main.json): PR required; no deletion; no force-push; required `Jenkins` and `continuous-integration/jenkins/pr-head` (app 4991392) and `gate-review` (GitHub Actions, app 15368) on a branch **up to date** with `main`; no bypass (owner: `never`)  |
-| Ruleset `24856083`     | [`github-ruleset-main-owner-merge.json`](github-ruleset-main-owner-merge.json): "restrict updates" of `main`, **disabled since 2026-10-11** (`enforcement: disabled`): its `update` rule turns every merge, PR merges included, into a bypass-only action. Kept for the record; do not re-enable |
-| Collaborators          | the owner only (`vassilva`, admin)                                                                                                                                                                                                                                                               |
-| Workflow token default | read-only; workflows cannot approve PRs                                                                                                                                                                                                                                                          |
+| Control                | Setting                                                                                                                                                                                                                                         |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Auto-merge             | **disabled** for the repository (`allow_auto_merge: false`)                                                                                                                                                                                     |
+| Ruleset `24842741`     | [`github-ruleset-main.json`](github-ruleset-main.json): PR required; no deletion; no force-push; required `Jenkins` and `continuous-integration/jenkins/pr-head` (Jenkins GitHub App 4991392) on a branch **up to date** with `main`; no bypass |
+| Ruleset `24856083`     | [`github-ruleset-main-owner-merge.json`](github-ruleset-main-owner-merge.json): "restrict updates", **disabled since 2026-10-11** (its `update` rule makes every PR merge a bypass-only action). Kept for the record; do not re-enable          |
+| Collaborators          | the owner only (`vassilva`, admin)                                                                                                                                                                                                              |
+| Workflow token default | read-only; workflows cannot approve PRs                                                                                                                                                                                                         |
 
-Ruleset `24842741` is the enforced protection: no direct or force push to `main`; a merge needs a
-PR with all three required signals passed on an up-to-date head, and nobody can bypass it. The
-"restrict updates" ruleset was disabled because, with any bypass mode, GitHub then shows "Cannot
-update this protected ref" on every PR and only the "bypass rules" checkbox merges; normal merges
-after passing checks are wanted instead. **Who can merge** therefore follows from repository
-access: in a user-owned repository anyone with write access can merge a PR whose required checks
-passed, and today the owner is the only collaborator. **Automation cannot
-merge:** Jenkins never merges (its GitHub App only publishes checks and statuses, and it is not a
-bypass actor); `gate-guard.yml` has no write access to code; `playwright.yml` is manual and
-read-only; there are no other workflows and no other apps with a bypass.
+A failed, missing or pending required check blocks the merge; nobody can bypass ruleset
+`24842741`. **Automation cannot merge:** Jenkins only publishes checks and statuses (it is not a
+bypass actor), `playwright.yml` is manual and read-only, and auto-merge is disabled. Who can merge
+follows from repository access (today only the owner). The required signals come from Jenkins only,
+so GitHub and Jenkins have no circular dependency: Jenkins never waits for a GitHub status.
 
-**Limits (stated, not hidden):** no rule names the merger: adding a collaborator with write access
-would give that person the same merge right. The owner can still edit or disable rulesets (an
-administrative action outside any PR).
-
-**Why `gate-review` and not GitHub's native approvals (evaluated 2026-10-12):** GitHub never lets
-a PR author approve their own PR, and in this single-maintainer repository the owner authors every
-PR. A required approving review (`required_approving_review_count` ≥ 1), or a required code-owner
-review through a `CODEOWNERS` file, would therefore block every PR, or force a bypass actor on the
-checks ruleset, which would weaken it. Required approvals stay at 0. Human review of gate-defining
-changes is enforced by the required `gate-review` status instead: ordinary PRs need no label (the
-status is `success` automatically, the Jenkins checks gate them); only gate-defining PRs need the
-`gate-change-reviewed` label, removed again by every new commit. Revisit native approvals when a
-second maintainer with write access exists: a required approval plus `CODEOWNERS` for the
-gate-defining paths could then replace the label.
+**History:** from 2026-10-10 to 2026-10-13 a required `gate-review` status (GitHub Actions) added a
+human review for "gate-defining" files. It was removed on 2026-10-13 by the owner's decision: every
+PR is gated by the CI checks, the merge is always a manual human act, and the human control before
+UAT is the Jenkins approval (see "Manual UAT approval").
 
 ### Required signals and what GitHub counts as passing
 
@@ -108,7 +101,7 @@ builds:
 
 | Jenkins result | `Jenkins` check run                         | `pr-head` commit status | Merge                                                  |
 | -------------- | ------------------------------------------- | ----------------------- | ------------------------------------------------------ |
-| SUCCESS        | success                                     | success                 | allowed (with `gate-review`)                           |
+| SUCCESS        | success                                     | success                 | allowed (manual merge)                                 |
 | UNSTABLE       | neutral (if configured) or failure          | failure                 | blocked (PR UNSTABLE is turned into FAILURE anyway)    |
 | FAILURE        | failure                                     | error                   | blocked                                                |
 | NOT_BUILT      | skipped                                     | error                   | blocked by the status (the pipeline never produces it) |
@@ -117,50 +110,6 @@ builds:
 
 GitHub counts a skipped or neutral required **check** as passing, but a commit **status** passes
 only when `success`; requiring both signals closes that gap. A missing signal blocks the merge.
-
-### gate-review: human review for gate-defining changes
-
-`.github/workflows/gate-guard.yml` runs from `main` (`pull_request_target`; `status` when Jenkins
-reports `pr-head`; `workflow_dispatch` from `gate-review-dispatch.yml` when a review is submitted,
-edited or dismissed; a PR cannot change it) and sets the required status `gate-review` with
-`.github/scripts/gate-review.mjs`.
-
-**The review signal** is a pull request review by the repository owner **on the current head
-commit** (GitHub records the commit, `commit_id`) whose body has a line reading exactly
-`gate-reviewed`. On your own PR, use **Files changed → Review changes → Comment** (GitHub refuses
-a self-approval, HTTP 422 "Can not approve your own pull request"; a Comment review is accepted,
-verified on PR #11). The guard then sets the label `gate-change-reviewed` itself, and removes it
-when the head moves on or when the label was added without such a review: the label shows the
-state, it is no longer the signal. Passing checks never count as a review. The guard also posts
-one instruction comment on each gate-defining PR (best effort, found again by a marker; a comment
-is never a review), and the failing status says what to do. The phrase line may be written as
-code (`` `gate-reviewed` ``) and in any letter case, but must stand alone on its line.
-
-| PR                                                                                             | owner review with `gate-reviewed` on this commit | Jenkins on this commit | `gate-review`          |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------ | ---------------------- | ---------------------- |
-| ordinary                                                                                       | –                                                | –                      | success                |
-| gate-defining                                                                                  | none (or only on an older commit)                | any                    | failure (needs review) |
-| gate-defining                                                                                  | yes                                              | not yet passed         | pending                |
-| gate-defining                                                                                  | yes                                              | passed                 | success                |
-| guard cannot read the PR or its reviews (API, permission)                                      | –                                                | –                      | failure (fail closed)  |
-| gate-defining with auto-merge enabled (defense in depth, should auto-merge ever be re-enabled) | any                                              | any                    | failure                |
-
-`gate-review-dispatch.yml` runs in the PR's context (`pull_request_review` uses the PR's workflow
-file), so it decides nothing: it only passes the PR number to the guard on `main`, with
-`actions: write` and no other permission. Removing or breaking it leaves `gate-review` failing.
-
-Gate-defining files are listed in `.github/gate-defining-paths.json` (Jenkinsfile, `scripts/ci/**`,
-`.github/**`, ruleset files, redaction and test-data controls, runner configuration and
-dependencies, the Playwright adapter, the CI agent image, lint and format configuration). A new
-commit invalidates every earlier review. **Permission finding:** the earlier guard tried to turn auto-merge off and
-GitHub answered "Resource not accessible by integration (disablePullRequestAutoMerge)": that
-mutation needs `contents: write`, which this `pull_request_target` workflow deliberately does not
-get. The obsolete operation was removed; protection comes from the required status, the disabled
-auto-merge and the checks ruleset `24842741`, not from a token permission. Residual limit: anyone
-holding the owner's credentials (the owner, or a tool or agent using the owner's token) can submit
-the review, and anyone with write access can write a workflow that posts a `gate-review` status;
-this protects against unattended and stale changes, not against a malicious admin or a leaked
-token.
 
 ### Jenkins job and GitHub discovery
 
@@ -353,7 +302,7 @@ no longer start; `build-overlap.ts` judges the records that remain.
 1. Stages run in sequence: a failing suite or count check fails its stage and the build; every
    later stage is skipped.
 2. Each later step requires the previous gate's own flag, set only as the last statement of its
-   stage: UAT Promotion requires `QA_REGRESSION_PASSED`; Deploy UAT and UAT Ready require
+   stage: UAT Approval requires `QA_REGRESSION_PASSED`; UAT Promotion requires `UAT_APPROVED`; Deploy UAT and UAT Ready require
    `UAT_PROMOTION_VERIFIED`; UAT Smoke requires `UAT_READY`; the record requires
    `UAT_SMOKE_PASSED`; Validation Complete requires every flag of the plan.
 3. No retries (`CUCUMBER_RETRY=0`), one worker, no ignored exit codes around suites, every suite run
@@ -365,23 +314,47 @@ no longer start; `build-overlap.ts` judges the records that remain.
 nothing listens; every scenario then fails for real, without changing any test or environment:
 
 - `fail-qa-regression`: QA Regression fails → FAILURE, **nothing deployed to UAT**;
-- `fail-uat-smoke`: UAT Smoke fails → FAILURE, no deployment record.
+- `fail-uat-smoke`: after the operator approves UAT, UAT Smoke fails → FAILURE, no deployment
+  record.
+
+The QA drill never reaches the approval; the UAT drill needs the approval like any `main` build.
 
 Run a normal `main` build afterwards so that QA and UAT end validated.
 
 ## Configuration
 
-| Item                         | Where                   | Default | Meaning                                      |
-| ---------------------------- | ----------------------- | ------- | -------------------------------------------- |
-| `PARABANK_MAIN_BRANCH`       | Jenkins global property | `main`  | Branch whose builds are the CD pipeline      |
-| `PARABANK_LOCK_WAIT_MINUTES` | Jenkins global property | `180`   | Maximum wait for the pipeline lock           |
-| `RUN_KNOWN_DEFECTS`          | Build parameter (MAIN)  | `false` | Run the known defects on UAT after UAT Smoke |
-| `ADDITIONAL_QA_SUITE`        | Build parameter         | `none`  | `sanity` or `full` on QA after the QA gate   |
-| `GATE_DRILL`                 | Build parameter (MAIN)  | `none`  | `fail-qa-regression` or `fail-uat-smoke`     |
+| Item                            | Where                   | Default | Meaning                                                                            |
+| ------------------------------- | ----------------------- | ------- | ---------------------------------------------------------------------------------- |
+| `PARABANK_MAIN_BRANCH`          | Jenkins global property | `main`  | Branch whose builds are the CD pipeline                                            |
+| `PARABANK_LOCK_WAIT_MINUTES`    | Jenkins global property | `180`   | Maximum wait for the pipeline lock                                                 |
+| `PARABANK_UAT_APPROVERS`        | Jenkins global property | (none)  | Jenkins user IDs allowed to approve UAT; **required** (empty: nothing reaches UAT) |
+| `PARABANK_UAT_APPROVAL_MINUTES` | Jenkins global property | `60`    | Approval wait before ABORTED (bounded to 1–120)                                    |
+| `RUN_KNOWN_DEFECTS`             | Build parameter (MAIN)  | `false` | Run the known defects on UAT after UAT Smoke                                       |
+| `ADDITIONAL_QA_SUITE`           | Build parameter         | `none`  | `sanity` or `full` on QA after the QA gate                                         |
+| `GATE_DRILL`                    | Build parameter (MAIN)  | `none`  | `fail-qa-regression` or `fail-uat-smoke`                                           |
 
-The former `PARABANK_UAT_APPROVERS` and `PARABANK_UAT_APPROVAL_MINUTES` global properties are no
-longer read (the manual approval was removed); they can be deleted from Jenkins once this version
-is on `main`.
+## Manual UAT approval
+
+After QA Regression passed on `main`, the build stops at **UAT Approval** (Jenkins input: "Deploy
+to UAT" or "Abort", on the build page and in the stage view). Only the Jenkins users listed in
+`PARABANK_UAT_APPROVERS` may approve; the answering user is checked again after the input, because
+a Jenkins administrator can answer any input. Nothing approves it automatically: no stored
+credential, script, bot or agent answers it.
+
+- **Approve:** UAT Promotion verifies main's head and the image, deploys it if UAT does not already
+  run it, then UAT Ready and UAT Smoke; the deployment record names the approver.
+- **Abort, timeout (`PARABANK_UAT_APPROVAL_MINUTES`, default 60) or build cancellation:** ABORTED;
+  no UAT stage runs, nothing is deployed, no deployment record.
+- **Answer by a user outside the list, or empty list:** FAILURE; nothing is deployed.
+- **While waiting** the build holds the pipeline lock and its executor; other ParaBank builds stay
+  QUEUED (the queue dispatcher allows one active build anyway). The wait is bounded.
+- **main moved on during the wait:** UAT Promotion aborts (SUPERSEDED); the newer `main` build asks
+  for its own approval.
+
+Verified on an isolated Jenkins 2.580.1 (no network, sandbox on) with the stage code extracted from
+the Jenkinsfile (2026-10-13): authorized approval → promotion ran, SUCCESS; reject → ABORTED;
+1-minute timeout → ABORTED; administrator outside the list → accepted by Jenkins, then refused by
+the stage → FAILURE, no promotion; empty list → FAILURE before asking.
 
 ## Roles: push validation by branch prefix
 
@@ -436,12 +409,12 @@ PR checkouts fetch only the PR ref, so the script fetches the target branch anon
 | a domain's steps or page object (e.g. `transfer.steps.ts`, `bill-pay.page.ts`)                                                                                                                                                                                                 | that domain's features          |
 | shared code: `src/support`, `src/api`, `src/factories`, `src/utils`, shared steps (customer, feedback, ledger) and pages (home, menu, feedback, index), `playwright/`, Playwright configs, `cucumber.js`, `package*.json`, `tsconfig.json`, `docker/parabank/`, `compose.yaml` | **Regression (24)**             |
 | CI/CD tooling (high risk): `Jenkinsfile`, `scripts/**`, `docker/ci-agent/**`, `.gitattributes`                                                                                                                                                                                 | **Regression (24)**             |
-| any gate-defining file (`.github/gate-defining-paths.json`, incl. `.github/**`, lint/format configs, the ruleset file)                                                                                                                                                         | **Regression (24)**             |
+| GitHub workflows (`.github/**`), lint, format and ignore rules (checked by the Quality Gates)                                                                                                                                                                                  | nothing beyond Smoke            |
 | documentation (`docs/**`, `*.md`), `.gitignore`, `.env.example` (never loaded in CI)                                                                                                                                                                                           | nothing beyond Smoke            |
 | anything the map does not know (e.g. a new page object)                                                                                                                                                                                                                        | **Regression (24)** (fail-safe) |
 
-**On pull requests the full Regression never runs:** a Regression-level selection (shared code,
-high-risk or gate-defining files) is recorded in `selection.json` and deferred to the post-merge QA
+**On pull requests the full Regression never runs:** a Regression-level selection (shared code or
+high-risk files) is recorded in `selection.json` and deferred to the post-merge QA
 Regression, which runs exactly once per promotion as the gate before UAT; feature-level selections
 still run on the PR. `qa/*` pushes run the selection in full.
 
@@ -453,12 +426,10 @@ selection, `--expect 24` for Regression). The selection is archived as
 new rule, and until then its files select Regression. Renames list both the old and the new path
 (`--no-renames`), so moving shared code into a domain file still selects Regression.
 
-**Gate-defining changes** (`GATE_DEFINING`: the Jenkinsfile, `scripts/ci/**`, the test-data audit,
-`cucumber.js`, `package*.json`, `tsconfig.json`, the Playwright adapter and configs, the CI agent
-image, lint/format configs, the ruleset file) are reported in the console and in `selection.json`
-as `GATE-DEFINING CHANGE`. Jenkins validates a PR with **the PR's own Jenkinsfile and scripts**, so
-such a PR can weaken the checks that judge it; it is merged manually after review, never
-auto-merged (see Merge policy).
+Jenkins validates a PR with **the PR's own Jenkinsfile and scripts**, so a PR that changes the
+pipeline or its scripts can change the checks that judge it. The human control for that is the
+manual merge (read the diff before merging); after the merge, `main` is validated with its own
+Jenkinsfile and nothing reaches UAT without the manual Jenkins approval.
 
 ## Suite counts and the coverage validator
 
@@ -589,11 +560,9 @@ JavaScript, `…number:!0,password:!0`, not data.)
 
 ## Operations: what remains manual
 
-1. **Merging:** the repository owner merges each PR in GitHub once its required checks passed (and,
-   for gate-defining changes, after reviewing it and adding the label `gate-change-reviewed`).
-2. **After this version is on `main`:** delete the obsolete Jenkins global properties
-   `PARABANK_UAT_APPROVERS` and `PARABANK_UAT_APPROVAL_MINUTES` (Manage Jenkins → System → Global
-   properties); nothing reads them any more.
+1. **Merging:** a person merges each PR in GitHub once its required checks passed. Never automatic.
+2. **UAT deployment:** an operator listed in `PARABANK_UAT_APPROVERS` approves each `main` build at
+   its UAT Approval stage (or aborts it). Never automatic.
 3. **Jenkins administrator, once:** install the queue dispatcher (see "Installation and
    rollback") and set the branch property "Suppress automatic SCM triggering" (`main|PR-\d+`, see
    "Jenkins job and GitHub discovery").
@@ -636,6 +605,15 @@ JavaScript, `…number:!0,password:!0`, not data.)
   temporarily (authorized).
 
 ## Validation status
+
+Records are dated; each describes the policy in force at that time (until 2026-10-13: the
+`gate-review` check and automatic UAT promotion).
+
+**Manual merge only, manual UAT approval (2026-10-13):** pipeline model tests (approval pending →
+no UAT stage; rejected or timed out → ABORTED, nothing deployed; unauthorized or unconfigured →
+FAILURE; Regression failure → no approval requested; CD success requires `UAT_APPROVED`); the
+approval stage code run on an isolated Jenkins 2.580.1 (see "Manual UAT approval"); the Jenkinsfile
+accepted by the 2.580.1 Declarative linter. Real `main` builds with a human approval: pending.
 
 **Real Jenkins and GitHub (2026-10-10), previous designs of this pipeline:**
 
