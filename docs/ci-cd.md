@@ -67,26 +67,39 @@ account; `main` is the default branch). Every merge into `main` is a **manual me
 repository owner in the GitHub interface**, after the required checks passed. Nothing merges
 automatically.
 
-| Control                | Setting (verified through the GitHub API)                                                                                                                                                                                                                                                       |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auto-merge             | **disabled** for the repository (`allow_auto_merge: false`): it cannot be enabled on any PR                                                                                                                                                                                                     |
-| Ruleset `24842741`     | [`github-ruleset-main.json`](github-ruleset-main.json): PR required; no deletion; no force-push; required `Jenkins` and `continuous-integration/jenkins/pr-head` (app 4991392) and `gate-review` (GitHub Actions, app 15368) on a branch **up to date** with `main`; no bypass (owner: `never`) |
-| Ruleset `24856083`     | [`github-ruleset-main-owner-merge.json`](github-ruleset-main-owner-merge.json): **restrict updates** of `main`; only repository admins bypass it, and only through a PR (owner: `pull_requests_only`)                                                                                           |
-| Collaborators          | the owner only (`vassilva`, admin)                                                                                                                                                                                                                                                              |
-| Workflow token default | read-only; workflows cannot approve PRs                                                                                                                                                                                                                                                         |
+| Control                | Setting (verified through the GitHub API)                                                                                                                                                                                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Auto-merge             | **disabled** for the repository (`allow_auto_merge: false`): it cannot be enabled on any PR                                                                                                                                                                                                      |
+| Ruleset `24842741`     | [`github-ruleset-main.json`](github-ruleset-main.json): PR required; no deletion; no force-push; required `Jenkins` and `continuous-integration/jenkins/pr-head` (app 4991392) and `gate-review` (GitHub Actions, app 15368) on a branch **up to date** with `main`; no bypass (owner: `never`)  |
+| Ruleset `24856083`     | [`github-ruleset-main-owner-merge.json`](github-ruleset-main-owner-merge.json): "restrict updates" of `main`, **disabled since 2026-10-11** (`enforcement: disabled`): its `update` rule turns every merge, PR merges included, into a bypass-only action. Kept for the record; do not re-enable |
+| Collaborators          | the owner only (`vassilva`, admin)                                                                                                                                                                                                                                                               |
+| Workflow token default | read-only; workflows cannot approve PRs                                                                                                                                                                                                                                                          |
 
-Two rulesets on purpose: a bypass applies per ruleset, so the owner's PR-only bypass of "restrict
-updates" never lets anyone skip the required checks of the other ruleset. Together: no direct or
-force push to `main`; a merge needs a PR with all three required signals passed on an up-to-date
-head; and only a repository admin (today: only the owner) can perform it. **Automation cannot
+Ruleset `24842741` is the enforced protection: no direct or force push to `main`; a merge needs a
+PR with all three required signals passed on an up-to-date head, and nobody can bypass it. The
+"restrict updates" ruleset was disabled because, with any bypass mode, GitHub then shows "Cannot
+update this protected ref" on every PR and only the "bypass rules" checkbox merges; normal merges
+after passing checks are wanted instead. **Who can merge** therefore follows from repository
+access: in a user-owned repository anyone with write access can merge a PR whose required checks
+passed, and today the owner is the only collaborator. **Automation cannot
 merge:** Jenkins never merges (its GitHub App only publishes checks and statuses, and it is not a
 bypass actor); `gate-guard.yml` has no write access to code; `playwright.yml` is manual and
 read-only; there are no other workflows and no other apps with a bypass.
 
-**Limits (stated, not hidden):** GitHub enforces "repository admins", not a named person: today the
-owner is the only admin, and adding another admin would give that person the same merge right.
-Required approving reviews stay at 0, because a single maintainer cannot approve their own PR.
-The owner can still edit or disable rulesets (an administrative action outside any PR).
+**Limits (stated, not hidden):** no rule names the merger: adding a collaborator with write access
+would give that person the same merge right. The owner can still edit or disable rulesets (an
+administrative action outside any PR).
+
+**Why `gate-review` and not GitHub's native approvals (evaluated 2026-10-12):** GitHub never lets
+a PR author approve their own PR, and in this single-maintainer repository the owner authors every
+PR. A required approving review (`required_approving_review_count` ≥ 1), or a required code-owner
+review through a `CODEOWNERS` file, would therefore block every PR, or force a bypass actor on the
+checks ruleset, which would weaken it. Required approvals stay at 0. Human review of gate-defining
+changes is enforced by the required `gate-review` status instead: ordinary PRs need no label (the
+status is `success` automatically, the Jenkins checks gate them); only gate-defining PRs need the
+`gate-change-reviewed` label, removed again by every new commit. Revisit native approvals when a
+second maintainer with write access exists: a required approval plus `CODEOWNERS` for the
+gate-defining paths could then replace the label.
 
 ### Required signals and what GitHub counts as passing
 
@@ -127,7 +140,7 @@ commit removes the label. **Permission finding:** the earlier guard tried to tur
 GitHub answered "Resource not accessible by integration (disablePullRequestAutoMerge)": that
 mutation needs `contents: write`, which this `pull_request_target` workflow deliberately does not
 get. The obsolete operation was removed; protection comes from the required status, the disabled
-auto-merge and the "restrict updates" ruleset, not from a token permission. Residual limit: anyone
+auto-merge and the checks ruleset `24842741`, not from a token permission. Residual limit: anyone
 with write access (today only the owner) can add the label or write a workflow that posts a
 `gate-review` status; this protects against unattended changes, not against a malicious admin.
 
