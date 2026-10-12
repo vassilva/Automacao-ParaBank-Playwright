@@ -1,0 +1,29 @@
+name: Gate review dispatch
+
+# A pull request review (submitted, edited or dismissed) asks the trusted guard on main
+# (.github/workflows/gate-guard.yml) to re-evaluate that PR's "gate-review" status.
+#
+# Untrusted by construction: pull_request_review runs the workflow file of the PR's merge ref, so a
+# PR can change this file. It therefore decides nothing: it passes only the PR number, and the guard
+# (run from main) reads the head commit, the files, the reviews and the checks from the API itself.
+# If this file is removed or broken, nothing is dispatched and gate-review stays failing (fail
+# closed). Fork PRs get a read-only token and cannot dispatch (Jenkins does not build them anyway).
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions:
+  actions: write
+
+jobs:
+  dispatch:
+    if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ask the guard on main to re-evaluate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh workflow run gate-guard.yml --repo "$REPO" --ref main -f pr="$PR"
