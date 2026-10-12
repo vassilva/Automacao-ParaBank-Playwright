@@ -12,3 +12,8 @@ export interface GateReviewDecision {
 }
 export function decideGateReview(input: GateReviewInput): GateReviewDecision;
 export function gateDefiningPaths(patterns: string[], changedPaths: string[]): string[];
+export function reviewedAtHead(
+  reviews: unknown,
+  headSha: unknown,
+  phrase?: string,
+): boolean | undefined;
