@@ -131,7 +131,10 @@ commit** (GitHub records the commit, `commit_id`) whose body has a line reading 
 a self-approval, HTTP 422 "Can not approve your own pull request"; a Comment review is accepted,
 verified on PR #11). The guard then sets the label `gate-change-reviewed` itself, and removes it
 when the head moves on or when the label was added without such a review: the label shows the
-state, it is no longer the signal. Passing checks never count as a review.
+state, it is no longer the signal. Passing checks never count as a review. The guard also posts
+one instruction comment on each gate-defining PR (best effort, found again by a marker; a comment
+is never a review), and the failing status says what to do. The phrase line may be written as
+code (`` `gate-reviewed` ``) and in any letter case, but must stand alone on its line.
 
 | PR                                                                                             | owner review with `gate-reviewed` on this commit | Jenkins on this commit | `gate-review`          |
 | ---------------------------------------------------------------------------------------------- | ------------------------------------------------ | ---------------------- | ---------------------- |
