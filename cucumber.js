@@ -11,6 +11,33 @@ const toInteger = (value, fallback) => {
   return Number.isNaN(parsed) ? fallback : parsed;
 };
 
+// One worker and no retries on every path (AGENTS.md). An override is refused instead of silently
+// changing what a run proves: concurrent registrations corrupt ParaBank (PB-20) and a retry hides
+// the failure it repeats. Covers the environment variables and the cucumber-js command line; the
+// Playwright entry point loads this file too and refuses --workers/--retries in its global setup.
+const cliValue = (flag) => {
+  const index = process.argv.findIndex((arg) => arg === flag || arg.startsWith(`${flag}=`));
+  if (index === -1) return undefined;
+  const arg = process.argv[index];
+  return arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : process.argv[index + 1];
+};
+const refuse = (setting, value, rule) => {
+  throw new Error(
+    `${setting} ${value} refused: this suite runs ${rule} on every environment (AGENTS.md, PB-20).`,
+  );
+};
+const parallel = toInteger(process.env.CUCUMBER_PARALLEL, 1);
+const retry = toInteger(process.env.CUCUMBER_RETRY, 0);
+if (parallel !== 1) refuse('CUCUMBER_PARALLEL', parallel, 'with exactly one worker');
+if (retry !== 0) refuse('CUCUMBER_RETRY', retry, 'without retries');
+const cliRetry = cliValue('--retry');
+if (cliRetry !== undefined && toInteger(cliRetry, -1) !== 0)
+  refuse('--retry', cliRetry, 'without retries');
+const cliParallel = cliValue('--parallel');
+if (cliParallel !== undefined && toInteger(cliParallel, -1) > 1) {
+  refuse('--parallel', cliParallel, 'with exactly one worker');
+}
+
 // One directory per run, so CI stages (smoke, regression, Environment 1/2) never overwrite
 // each other's reports.
 const reportsDir = process.env.REPORTS_DIR || 'reports';
@@ -29,9 +56,9 @@ const common = {
   formatOptions: { snippetInterface: 'async-await' },
   // One worker on every environment: ParaBank's registration is not safe under concurrent
   // requests (PB-20, docs/defects.md), and every scenario registers its own customer. Jenkins and
-  // the Playwright entry point enforce 1; keep CUCUMBER_PARALLEL at 1.
-  parallel: toInteger(process.env.CUCUMBER_PARALLEL, 1),
-  retry: toInteger(process.env.CUCUMBER_RETRY, 0),
+  // the Playwright entry point enforce 1; any other value is refused above.
+  parallel,
+  retry,
   strict: true,
 };
 

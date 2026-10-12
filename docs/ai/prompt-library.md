@@ -72,6 +72,8 @@ patterns (`npm run lint` passes once used).
 > that could reach evidence. Rank findings by severity; propose the smallest fix for each.
 
 **Output:** findings (severity, file:line, evidence, fix); the 14-criterion checklist result.
+Record a review of a real change in `docs/ai/reviews/<date>-<change>.md` (findings, disposition,
+validation), so the review is traceable in the PR.
 **Acceptance:** every finding is reproducible from the cited code; no style-only noise.
 
 ## 5. Flaky-test investigation

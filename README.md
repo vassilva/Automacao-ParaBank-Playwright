@@ -125,8 +125,8 @@ because every customer is created per scenario.
 | `REPORTS_DIR`         | `reports` | Where a run writes its reports (CI: `reports/<env>/<suite>`)                        |
 | `HEADLESS`            | `true`    | `false` shows the browser (headed/debug runs)                                       |
 | `SLOW_MO`             | `0`       | Milliseconds between Playwright actions, for watching a run                         |
-| `CUCUMBER_PARALLEL`   | `1`       | Worker count; keep 1 (ParaBank registration is not concurrency-safe, see below)     |
-| `CUCUMBER_RETRY`      | `0`       | Retries for failed scenarios; retried scenarios are reported as such                |
+| `CUCUMBER_PARALLEL`   | `1`       | Worker count; any other value is refused (registration not concurrency-safe)        |
+| `CUCUMBER_RETRY`      | `0`       | Retries; any other value (or `--retry`) is refused: a retry hides the failure       |
 | `PW_TRACE_ON_FAILURE` | `false`   | Save a Playwright trace for failed scenarios (local use only, see Security)         |
 | `NET_DIAG`            | `false`   | Per-scenario request accounting in `reports/network-diagnostics.jsonl` (redacted)   |
 

@@ -17,6 +17,15 @@ export default function globalSetup(config: FullConfig): void {
         'concurrency-safe, so this suite must run with exactly one worker.',
     );
   }
+  // --retries N (or a config change) would re-run a failed scenario and report it as flaky or
+  // passed: a retry hides the failure it repeats. Refused like --workers.
+  const retries = [...new Set(config.projects.map((project) => project.retries))];
+  if (retries.some((value) => value !== 0)) {
+    throw new Error(
+      `Refusing to run with retries ${retries.join('/')}: this suite runs without retries; ` +
+        'investigate a failure instead (docs/failure-triage.md).',
+    );
+  }
 
   const check = spawnSync(
     process.execPath,
