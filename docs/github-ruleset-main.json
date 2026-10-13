@@ -1,5 +1,5 @@
 {
-  "name": "main: pull request + Jenkins PR check + gate review (up to date)",
+  "name": "main: pull request + Jenkins PR checks (up to date)",
   "target": "branch",
   "enforcement": "active",
   "conditions": {
@@ -39,10 +39,6 @@
           {
             "context": "continuous-integration/jenkins/pr-head",
             "integration_id": 4991392
-          },
-          {
-            "context": "gate-review",
-            "integration_id": 15368
           }
         ]
       }

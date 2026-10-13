@@ -342,20 +342,20 @@ evaluation: [docs/ai/playwright-mcp-assessment.md](docs/ai/playwright-mcp-assess
 One pipeline runs at a time (the others wait in the Jenkins queue); the application image is reused unless the application
 itself changed, and UAT only ever receives the image QA Regression validated:
 
-| Event        | Test plan                                                                                                                                                                        |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Push         | By branch prefix: `feature/*` QA Smoke (4); `qa/*` QA Impacted Tests; `config/*` Quality Gates + Config Check only (no deployment)                                               |
-| Pull request | Quality gates → config check → application image → QA Smoke (4) → feature-level impacted tests → completeness check = the required checks; no Regression, no UAT                 |
-| Merge        | **Manual**, by the repository owner in GitHub, after the required checks passed (auto-merge disabled; gate-defining changes also need review)                                    |
-| `main`       | Quality gates → application image → QA Regression (24, once) → **automatic** UAT promotion of the validated image (deployed only if UAT does not already run it) → UAT Smoke (4) |
+| Event        | Test plan                                                                                                                                                                      |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Push         | By branch prefix: `feature/*` QA Smoke (4); `qa/*` QA Impacted Tests; `config/*` Quality Gates + Config Check only (no deployment)                                             |
+| Pull request | Quality gates → config check → application image → QA Smoke (4) → feature-level impacted tests → completeness check = the required checks; no Regression, no UAT               |
+| Merge        | **Manual** in GitHub, only after every required check passed (auto-merge disabled; a failed, missing or pending check blocks it)                                               |
+| `main`       | Quality gates → application image → QA Regression (24, once) → **manual UAT approval** in Jenkins (authorized operator) → UAT promotion of the validated image → UAT Smoke (4) |
 
 Quality gates on every push and PR: lint, format, typecheck, strict dry run, test-data audit, the
 CI/CD tests (`npm run test:ci`), the BDD structure check and the suite inventories. Each suite run
 is checked against its approved size. Known defects never gate a deployment (optional stage on
 `main`, at most UNSTABLE). Cucumber always runs with one worker and no retries.
-**Status:** earlier designs validated on the real Jenkins (2026-10-10); this version (serialized,
-automatic UAT promotion) is validated locally and awaits its first real run; see
-[docs/ci-cd.md](docs/ci-cd.md).
+**Status:** serialized pipeline validated on the real Jenkins; the manual UAT approval (2026-10-13)
+is validated by the pipeline tests and on an isolated Jenkins 2.580.1, and awaits its first real
+`main` run; see [docs/ci-cd.md](docs/ci-cd.md).
 
 `.github/workflows/playwright.yml` is a secondary GitHub Actions validation; it is not part of the
 Jenkins model and is reviewed with the Git/GitHub integration.

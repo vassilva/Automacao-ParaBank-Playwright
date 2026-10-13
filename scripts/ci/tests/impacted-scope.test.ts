@@ -10,8 +10,9 @@ describe('impacted tests on pull requests', () => {
     assert.equal(deferredToMain(s, 'features'), true);
   });
 
-  it('defers gate-defining changes too (they select Regression)', () => {
+  it('defers CI/CD tooling changes too (Jenkinsfile selects Regression)', () => {
     const s = classify('test', ['Jenkinsfile']);
+    assert.equal(s.kind, 'regression');
     assert.equal(deferredToMain(s, 'features'), true);
   });
 
