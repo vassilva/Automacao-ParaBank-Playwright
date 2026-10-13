@@ -12,6 +12,10 @@ const before = (ran: string[], a: string, b: string) => {
   assert.ok(ran.indexOf(a) < ran.indexOf(b), `${a} before ${b}`);
 };
 const UAT = ['UAT Promotion', 'Deploy UAT', 'UAT Ready', 'UAT Smoke', 'Deployment Record'];
+const approval = src.slice(
+  src.indexOf("stage('UAT Approval')"),
+  src.indexOf("stage('UAT Promotion')"),
+);
 
 describe('pull request (pre-merge)', () => {
   const run = simulate('feature/x', '7', { appImage: 'REUSE' });
@@ -49,14 +53,15 @@ describe('pull request (pre-merge)', () => {
   });
 });
 
-describe('main (post-merge): Regression once, then automatic UAT promotion', () => {
+describe('main (post-merge): Regression once, then MANUAL UAT approval, then promotion', () => {
   const run = simulate('main', null, { appImage: 'REUSE' });
 
   it('runs QA Regression exactly once, on QA, after QA Ready and before any UAT stage', () => {
     assert.equal(run.result, 'SUCCESS');
     assert.equal(run.ran.filter((s) => s === 'QA Regression').length, 1);
     before(run.ran, 'QA Ready', 'QA Regression');
-    before(run.ran, 'QA Regression', 'UAT Promotion');
+    before(run.ran, 'QA Regression', 'UAT Approval');
+    before(run.ran, 'UAT Approval', 'UAT Promotion');
   });
 
   it('runs no QA Smoke and no impacted tests on main', () => {
@@ -64,11 +69,53 @@ describe('main (post-merge): Regression once, then automatic UAT promotion', () 
     assert.ok(!run.ran.includes('QA Impacted Tests'));
   });
 
-  it('promotes automatically: no manual approval, input or milestone anywhere', () => {
-    assert.doesNotMatch(src, /stage\('UAT Approval'\)/);
-    assert.doesNotMatch(src, /\binput\s*\(/);
+  it('waits for the manual UAT approval after QA Regression: no UAT stage runs before it', () => {
+    const r = simulate('main', null, { appImage: 'REUSE', uatApproval: 'pending' });
+    assert.equal(r.result, 'WAITING at UAT Approval');
+    assert.ok(r.ran.includes('QA Regression'));
+    for (const s of UAT) assert.ok(!r.ran.includes(s), `${s} must wait for the approval`);
+  });
+
+  for (const outcome of ['rejected', 'timeout'] as const) {
+    it(`deploys nothing when the approval is ${outcome} (ABORTED, no deployment record)`, () => {
+      const r = simulate('main', null, { appImage: 'REUSE', uatApproval: outcome });
+      assert.match(r.result, /^ABORTED at UAT Approval/);
+      for (const s of UAT) assert.ok(!r.ran.includes(s), `${s} must not run`);
+    });
+  }
+
+  for (const outcome of ['unauthorized', 'unconfigured'] as const) {
+    it(`fails without deploying when the approval is ${outcome}`, () => {
+      const r = simulate('main', null, { appImage: 'REUSE', uatApproval: outcome });
+      assert.match(r.result, /^FAILURE at UAT Approval/);
+      for (const s of UAT) assert.ok(!r.ran.includes(s), `${s} must not run`);
+    });
+  }
+
+  it('the approval is a real Jenkins input limited to PARABANK_UAT_APPROVERS, bounded in time', () => {
+    assert.match(approval, /input\(/);
+    assert.match(approval, /submitter: approvers\.join\(','\)/);
+    assert.match(approval, /timeout\(time: minutes, unit: 'MINUTES'\)/);
+    assert.match(approval, /Math\.min\(120,/);
+    // The answering user is checked again (a Jenkins administrator can answer any input).
+    assert.match(approval, /if \(!approvers\.contains\(approver\)\)/);
+    // Unset allow-list: nothing is deployed.
+    assert.match(approval, /approvers\.isEmpty\(\)[\s\S]*?error\(/);
+  });
+
+  it('nothing in the repository answers the approval automatically', () => {
+    assert.doesNotMatch(src, /proceedEmpty|\/input\/[A-Za-z]+\/(proceed|submit)|inputSubmit/);
+    assert.doesNotMatch(approval, /parameters:/);
     assert.doesNotMatch(src, /\bmilestone\s*\(/);
-    assert.doesNotMatch(src, /PARABANK_UAT_APPROVERS|PARABANK_UAT_APPROVAL_MINUTES/);
+  });
+
+  it('UAT Promotion depends on the approval, and CD success requires it', () => {
+    const promotion = src.slice(
+      src.indexOf("stage('UAT Promotion')"),
+      src.indexOf("stage('Deploy UAT')"),
+    );
+    assert.match(promotion, /env\.UAT_APPROVED == 'true'/);
+    assert.match(src, /'CD'\s*:\s*\[[^\]]*'UAT_APPROVED'/);
   });
 
   it('deploys the validated image to UAT, then UAT Smoke (4), then the record', () => {
@@ -95,7 +142,8 @@ describe('main (post-merge): Regression once, then automatic UAT promotion', () 
   it('blocks UAT when QA Regression fails or is skipped', () => {
     const failed = simulate('main', null, { fail: 'QA Regression' });
     assert.match(failed.result, /^FAILURE/);
-    for (const s of UAT) assert.ok(!failed.ran.includes(s), `${s} must not run`);
+    for (const s of [...UAT, 'UAT Approval'])
+      assert.ok(!failed.ran.includes(s), `${s} must not run`);
     const skipped = simulate('main', null, { skip: 'QA Regression' });
     for (const s of UAT)
       assert.ok(!skipped.ran.includes(s), `${s} must not run without Regression`);
@@ -207,5 +255,34 @@ describe('application image (no rebuild for test-only changes)', () => {
     for (const s of ['Resolve Application Image', 'Build Image', 'Deploy QA']) {
       assert.ok(!r.ran.includes(s), s);
     }
+  });
+});
+
+describe('Sanity is manual only (never triggered automatically)', () => {
+  it('the ADDITIONAL_QA_SUITE parameter defaults to none (the first choice)', () => {
+    const choices = /name: 'ADDITIONAL_QA_SUITE',\s*choices: \[([^\]]*)\]/.exec(src)?.[1] ?? '';
+    assert.equal(choices.split(',')[0]?.trim(), "'none'");
+  });
+
+  it('no automatic build (PR, main, push) runs the additional suite', () => {
+    for (const [branch, change] of [
+      ['PR-1', '1'],
+      ['main', null],
+      ['feature/x', null],
+      ['qa/x', null],
+    ] as const) {
+      const r = simulate(branch, change, { appImage: 'REUSE' });
+      assert.ok(!r.ran.includes('QA Additional Suite'), `${branch} ran the additional suite`);
+    }
+  });
+
+  it('Sanity can only run in that manual stage', () => {
+    const start = src.indexOf("stage('QA Additional Suite')");
+    const end = src.indexOf("stage('UAT Approval')");
+    const stage = src.slice(start, end);
+    assert.match(stage, /params\.ADDITIONAL_QA_SUITE != 'none'/);
+    // Elsewhere Sanity is only inventoried (ci:coverage without a report directory), never run.
+    const outside = src.slice(0, start) + src.slice(end);
+    assert.doesNotMatch(outside, /runSuite\([^)]*sanity|test:sanity|--profile sanity/);
   });
 });

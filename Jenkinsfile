@@ -2,8 +2,9 @@
 // One Jenkinsfile, one Multibranch Pipeline. The definitive flow (docs/ci-cd.md):
 //
 //   local development -> push to a feature branch -> Pull Request -> Quality Gates -> QA Smoke (4)
-//   -> MANUAL merge by the repository owner in GitHub (no auto-merge) -> main: QA Regression (24)
-//   -> automatic UAT promotion of the validated image -> UAT Smoke (4) -> SUCCESS
+//   -> MANUAL merge in GitHub (no auto-merge) -> main: QA Regression (24) -> MANUAL UAT approval
+//   in Jenkins (authorized operator only) -> UAT promotion of the validated image -> UAT Smoke (4)
+//   -> SUCCESS
 //
 //   PUSH (branch, by prefix; a branch with an open PR is built as the PR only; only main and PR-<n>
 //   are built automatically, every other branch only when started manually, docs/ci-cd.md):
@@ -15,10 +16,12 @@
 //                      main) -> QA Gate -> Validation Complete. Never Regression, never UAT. Its
 //                      result is the required "Jenkins" check and pr-head status.
 //   MAIN (CD)          Quality Gates -> app image -> QA Ready -> QA Regression (24, once)
+//                      -> UAT Approval (Jenkins input; only PARABANK_UAT_APPROVERS; reject,
+//                         timeout or abort -> ABORTED, nothing reaches UAT)
 //                      -> UAT Promotion (main's head, image ID, revision, inputs digest)
 //                      -> Deploy UAT (only if UAT does not already run that image ID) -> UAT Ready
 //                      -> UAT Smoke (4) [-> Known Defects, optional] -> Deployment Record
-//                      -> Validation Complete. No manual approval, no UAT Regression.
+//                      -> Validation Complete. No UAT Regression.
 //
 // STRICT SERIALIZATION, in the Jenkins QUEUE: the plugin jenkins/parabank-serial-queue-plugin
 // (installed on the controller by the administrator) keeps every build of this job QUEUED while
@@ -49,6 +52,9 @@
 // Jenkins-level settings (Manage Jenkins -> System -> Global properties -> Environment variables):
 //   PARABANK_MAIN_BRANCH        branch whose builds are the CD pipeline (default: main)
 //   PARABANK_LOCK_WAIT_MINUTES  maximum wait for the pipeline lock (default 180)
+//   PARABANK_UAT_APPROVERS      Jenkins user IDs allowed to approve UAT (comma-separated; REQUIRED:
+//                               unset or empty -> nothing is deployed to UAT)
+//   PARABANK_UAT_APPROVAL_MINUTES  approval wait before ABORTED (default 60, bounded to 1..120)
 
 def banner(String title, Map fields) {
   def lines = ['========================================', title, '========================================']
@@ -190,7 +196,7 @@ pipeline {
             'QA'          : 'QA: Impacted Tests vs main (no UAT)',
             'CONFIGURATOR': 'Quality Gates + Config Check (no image, no deployment)',
             'CI'          : 'QA: Smoke (+ feature-level impacted tests); no Regression, no UAT -> required checks; manual merge',
-            'CD'          : 'QA: Regression (24, once) -> automatic UAT promotion of the validated image -> UAT: Smoke (4)',
+            'CD'          : 'QA: Regression (24, once) -> manual UAT approval -> UAT promotion of the validated image -> UAT: Smoke (4)',
           ][env.PIPELINE_ROLE]
           banner('PARABANK PIPELINE', [
             'BUILD MODE'      : env.BUILD_MODE,
@@ -422,9 +428,8 @@ pipeline {
         // Pull requests (after Smoke) and QA pushes: the scenarios the change can affect, chosen
         // from its changed files against the target branch (scripts/ci/impacted-tests.ts; shared
         // code, environments and CI/CD tooling -> the whole Regression suite, documentation ->
-        // nothing more; gate-defining changes are reported for manual merge), then
-        // checked to have run exactly, once, and passed. With Smoke, this is the PR's "Jenkins"
-        // check that GitHub requires before a merge or an auto-merge.
+        // nothing more), then checked to have run exactly, once, and passed. With Smoke, this is
+        // the PR's "Jenkins" check that GitHub requires before the (always manual) merge.
         stage('QA Impacted Tests') {
           when {
             expression { env.RUNS_IMPACTED == 'true' && (env.RUNS_SMOKE != 'true' || env.QA_SMOKE_PASSED == 'true') }
@@ -499,14 +504,63 @@ pipeline {
           }
         }
 
-        // AUTOMATIC UAT PROMOTION (no human approval), fail-closed: main's head must still be this
+        // MANUAL UAT AUTHORIZATION (main): after QA Regression passed, a Jenkins user listed in
+        // PARABANK_UAT_APPROVERS approves deploying this exact image to UAT. Nothing approves it
+        // automatically (no stored credentials, scripts or bots). Reject, timeout or abort ->
+        // ABORTED: no UAT stage runs and no deployment record is written. The approver is checked
+        // again after the input (a Jenkins administrator can answer any input). The global lock
+        // stays held while waiting (the queue plugin keeps other ParaBank builds QUEUED anyway); the
+        // wait is bounded (PARABANK_UAT_APPROVAL_MINUTES, at most 120, inside the block's 300).
+        stage('UAT Approval') {
+          when {
+            expression { env.BUILD_MODE == 'MAIN' && env.QA_REGRESSION_PASSED == 'true' }
+          }
+          steps {
+            script {
+              def approvers = (env.PARABANK_UAT_APPROVERS ?: '').split(',').collect { it.trim() }.findAll { it }
+              if (approvers.isEmpty()) {
+                error('UAT approval is not configured: set the Jenkins global property PARABANK_UAT_APPROVERS to the Jenkins user ID(s) allowed to approve. Nothing is deployed to UAT.')
+              }
+              def minutes = Math.max(1, Math.min(120, ((env.PARABANK_UAT_APPROVAL_MINUTES ?: '60').trim()) as Integer))
+              banner('UAT APPROVAL REQUIRED', [
+                'IMAGE ID'         : env.IMAGE_ID,
+                'SOURCE COMMIT'    : env.SOURCE_COMMIT,
+                'MAIN COMMIT'      : env.GIT_COMMIT,
+                'QA VALIDATION'    : "regression ${env.REGRESSION_EXPECTED}/${env.REGRESSION_EXPECTED} passed",
+                'APPROVERS'        : approvers.join(', '),
+                'TIMEOUT (MINUTES)': minutes,
+              ])
+              def answer = null
+              timeout(time: minutes, unit: 'MINUTES') {
+                answer = input(
+                  id: 'ApproveUatDeployment',
+                  message: "QA Regression passed (${env.REGRESSION_EXPECTED}/${env.REGRESSION_EXPECTED}) for image ${env.IMAGE_ID}. Deploy this exact image to UAT and run UAT Smoke?",
+                  ok: 'Deploy to UAT',
+                  submitter: approvers.join(','),
+                  submitterParameter: 'APPROVER'
+                )
+              }
+              // With only submitterParameter the step returns the approver's user ID (a Map on some
+              // plugin versions); either way it is checked against the allow-list again.
+              def approver = ((answer instanceof Map) ? answer.APPROVER : answer)?.toString()?.trim() ?: ''
+              if (!approvers.contains(approver)) {
+                error("'${approver}' is not an authorized UAT approver (PARABANK_UAT_APPROVERS). Nothing is deployed to UAT.")
+              }
+              env.UAT_APPROVER = approver
+              echo "UAT deployment approved by ${approver}"
+              env.UAT_APPROVED = 'true'
+            }
+          }
+        }
+
+        // UAT PROMOTION after the manual approval, fail-closed: main's head must still be this
         // commit (otherwise a newer main build promotes), and the image must be the one QA Regression
         // validated (same ID, present, pinned revision, same application inputs). Then the policy:
         // deploy only if UAT does not already run that exact image ID (a test-only or documentation
         // merge keeps the same image: UAT is not redeployed, only verified by UAT Smoke).
         stage('UAT Promotion') {
           when {
-            expression { env.BUILD_MODE == 'MAIN' && env.QA_REGRESSION_PASSED == 'true' }
+            expression { env.BUILD_MODE == 'MAIN' && env.UAT_APPROVED == 'true' }
           }
           steps {
             script {
@@ -635,7 +689,8 @@ pipeline {
                 "UAT image ID:    ${env.UAT_IMAGE_ID}",
                 "Identity:        MATCH (verified from Docker metadata)",
                 "QA validation:   regression ${env.REGRESSION_EXPECTED}/${env.REGRESSION_EXPECTED} (gate before UAT)",
-                "UAT deployment:  ${env.UAT_DEPLOY_REQUIRED == 'true' ? 'performed by this build (automatic)' : 'not required (UAT already ran this image)'}",
+                "UAT approval:    approved by ${env.UAT_APPROVER} (manual, Jenkins input)",
+                "UAT deployment:  ${env.UAT_DEPLOY_REQUIRED == 'true' ? 'performed by this build after approval' : 'not required (UAT already ran this image)'}",
                 "UAT validation:  smoke ${env.SMOKE_EXPECTED}/${env.SMOKE_EXPECTED}",
                 "Main commit:     ${env.GIT_COMMIT}",
                 "Jenkins build:   ${env.JOB_NAME} #${env.BUILD_NUMBER}",
@@ -703,7 +758,7 @@ pipeline {
             'QA'          : ['QA_IMPACTED_PASSED', 'QA_GATE_PASSED'],
             'CONFIGURATOR': ['CONFIG_CHECK_PASSED'],
             'CI'          : ['CONFIG_CHECK_PASSED', 'QA_SMOKE_PASSED', 'QA_IMPACTED_PASSED', 'QA_GATE_PASSED'],
-            'CD'          : ['QA_REGRESSION_PASSED', 'UAT_PROMOTION_VERIFIED', 'UAT_READY', 'UAT_SMOKE_PASSED'],
+            'CD'          : ['QA_REGRESSION_PASSED', 'UAT_APPROVED', 'UAT_PROMOTION_VERIFIED', 'UAT_READY', 'UAT_SMOKE_PASSED'],
           ][env.PIPELINE_ROLE]
           if (required == null || (env.BUILD_MODE == 'PULL REQUEST' && env.PIPELINE_ROLE != 'CI') || (env.BUILD_MODE == 'MAIN' && env.PIPELINE_ROLE != 'CD')) {
             error("VALIDATION INCOMPLETE: no validation plan for ${env.BUILD_MODE} / ${env.PIPELINE_ROLE}.")
