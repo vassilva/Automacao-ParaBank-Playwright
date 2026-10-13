@@ -80,6 +80,11 @@ docker create --name "$NAME" --network none --memory 900m --restart unless-stopp
   -e JAVA_OPTS="-Xmx512m -Djenkins.install.runSetupWizard=false -Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true" \
   "$IMAGE" >/dev/null
 docker exec "$SOURCE" tar -C /var/jenkins_home -cf - plugins | docker cp - "$NAME:/var/jenkins_home/"
+# Newer cores (seen on 2.580.1) refuse CLI connections until the Jenkins URL is configured.
+printf '%s\n' "<?xml version='1.1' encoding='UTF-8'?>" '<jenkins.model.JenkinsLocationConfiguration>' \
+  '  <jenkinsUrl>http://localhost:8080/</jenkinsUrl>' '</jenkins.model.JenkinsLocationConfiguration>' \
+  >"$OUT/jenkins.model.JenkinsLocationConfiguration.xml"
+docker cp "$OUT/jenkins.model.JenkinsLocationConfiguration.xml" "$NAME:/var/jenkins_home/"
 docker start "$NAME" >/dev/null
 # docker cp extracts as root: give the plugins back to the jenkins user (plugin deployment writes
 # there).
