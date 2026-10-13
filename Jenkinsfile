@@ -736,11 +736,21 @@ pipeline {
                 docker image rm "$IMAGE_TAG" || true
               fi
             '''
+            // Verify the redaction before anything is archived: a file with an unmasked sensitive
+            // value is removed from the workspace and the build fails (scripts/ci/evidence-scan.ts).
+            // returnStatus: a scan problem never skips the lock release below.
+            if (fileExists('node_modules')) {
+              def scan = sh(script: 'npm run -s ci:evidence-scan -- --quarantine reports build deployment', returnStatus: true)
+              if (scan != 0) {
+                currentBuild.result = 'FAILURE'
+                echo 'EVIDENCE SCAN FAILED: unmasked sensitive values found; the flagged files were not archived (see above).'
+              }
+            }
             // Always last, on every outcome; plain sh (works even if npm ci failed). Owner-scoped:
             // releases only this build's lock.
             sh 'sh scripts/ci/pipeline-lock.sh release "$BUILD_TAG"'
           }
-          // Traces are never produced in CI; reports and logs are redacted (docs/ci-cd.md).
+          // Traces are never produced in CI; reports and logs are redacted and scanned (docs/ci-cd.md).
           archiveArtifacts artifacts: 'reports/**, build/**, deployment/**', allowEmptyArchive: true
         }
       }
