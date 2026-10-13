@@ -23,6 +23,12 @@ export interface Injection {
   headMovedBeforePromotion?: boolean;
   /** The pipeline lock could not be acquired within the bounded wait. */
   lockTimeout?: boolean;
+  /**
+   * Outcome of the manual UAT approval (Jenkins input). Default: approved by an authorized user.
+   * pending = still waiting; rejected/timeout = ABORTED; unauthorized = answered by a user outside
+   * PARABANK_UAT_APPROVERS; unconfigured = PARABANK_UAT_APPROVERS empty.
+   */
+  uatApproval?: 'approved' | 'pending' | 'rejected' | 'timeout' | 'unauthorized' | 'unconfigured';
 }
 
 export interface Run {
@@ -107,6 +113,14 @@ export function simulate(branch: string, changeId: string | null, inject: Inject
         (env.RUNS_IMPACTED === 'true' && env.QA_IMPACTED_PASSED !== 'true'))
     ) {
       return { result: 'FAILURE at QA Gate', ran };
+    }
+    if (s.name === 'UAT Approval') {
+      const outcome = inject.uatApproval ?? 'approved';
+      if (outcome === 'pending') return { result: 'WAITING at UAT Approval', ran };
+      if (outcome === 'rejected' || outcome === 'timeout') {
+        return { result: `ABORTED at UAT Approval (${outcome})`, ran };
+      }
+      if (outcome !== 'approved') return { result: `FAILURE at UAT Approval (${outcome})`, ran };
     }
     if (s.name === 'UAT Promotion') {
       if (inject.headMovedBeforePromotion) return { result: 'ABORTED (SUPERSEDED)', ran };

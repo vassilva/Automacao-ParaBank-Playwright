@@ -38,5 +38,5 @@ message, run the single scenario (`npm test -- features/<file>.feature:<line>`),
   scenarios passed on QA.
 - **Rework:** any criterion fails, or a test passed without having been seen to fail.
 - **Human review is mandatory** for significant AI-generated changes: new or changed `Then`
-  steps, suite tags, known-defect scenarios or proofs, Page Object actions, and anything in a
-  gate-defining path (`.github/gate-defining-paths.json`).
+  steps, suite tags, known-defect scenarios or proofs, Page Object actions, and anything in the
+  pipeline, CI scripts, workflows or redaction controls. The merge itself is always manual.

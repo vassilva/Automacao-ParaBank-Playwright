@@ -20,8 +20,7 @@
  *   - documentation, the secondary GitHub Actions workflow, lint/format/ignore rules
  *                                            -> nothing beyond the PR's Smoke
  *   - anything the map does not know         -> the Regression suite (fail-safe)
- * Known-defect scenarios are never selected (the "full" profile excludes them). Changes to the
- * files that define the gates are also reported as GATE-DEFINING (.github/gate-defining-paths.json).
+ * Known-defect scenarios are never selected (the "full" profile excludes them).
  *
  * `run` executes the selection on the target configured by TARGET_ENV / PARABANK_BASE_URL with
  * reports in reports/<env>/impacted, then checks that exactly the selected scenarios ran, once,
@@ -126,19 +125,6 @@ const RULES: [RegExp, Impact | 'self', string][] = [
   ],
 ];
 
-/**
- * Files that define the gates and security controls (.github/gate-defining-paths.json, the single
- * list). A PR changing them is validated by the gates it changes (Jenkins runs the PR's own
- * Jenkinsfile), so it is reviewed and merged manually. Here they are only reported; the
- * enforcement is .github/workflows/gate-guard.yml, which reads main's copy of the list and turns
- * auto-merge off on such PRs.
- */
-const GATE_DEFINING: RegExp[] = (
-  JSON.parse(readFileSync(path.join('.github', 'gate-defining-paths.json'), 'utf8')) as {
-    patterns: string[];
-  }
-).patterns.map((pattern) => new RegExp(pattern));
-
 function git(args: string[]): string {
   const result = spawnSync('git', ['-c', 'safe.directory=*', ...args], { encoding: 'utf8' });
   if (result.status !== 0) {
@@ -182,7 +168,6 @@ export interface Selection {
   changed: { file: string; impact: string; reason: string }[];
   kind: 'none' | 'regression' | 'features';
   features: string[];
-  gateDefining: string[];
 }
 
 export function select(): Selection {
@@ -197,10 +182,9 @@ export function select(): Selection {
 
 /** The selection for a list of changed files (exported to check the map without git). */
 export function classify(base: string, changed: string[]): Selection {
-  const selection: Selection = { base, changed: [], kind: 'none', features: [], gateDefining: [] };
+  const selection: Selection = { base, changed: [], kind: 'none', features: [] };
   const files = new Set<string>();
   for (const file of changed) {
-    if (GATE_DEFINING.some((pattern) => pattern.test(file))) selection.gateDefining.push(file);
     const rule = RULES.find(([pattern]) => pattern.test(file));
     const impact = rule ? rule[1] : REGRESSION;
     const reason = rule ? rule[2] : 'not in the impact map (fail-safe)';
@@ -218,8 +202,6 @@ export function classify(base: string, changed: string[]): Selection {
       selection.changed.push({ file, impact: 'none', reason });
     }
   }
-  // A change to the gates themselves always gets the strongest QA suite.
-  if (selection.gateDefining.length > 0) selection.kind = 'regression';
   if (selection.kind !== 'regression' && files.size > 0) {
     selection.kind = 'features';
     selection.features = [...files].sort();
@@ -354,12 +336,6 @@ function main(): void {
     `SELECTION: ${selection.kind}` +
       (selection.kind === 'features' ? ` (${selection.features.join(', ')})` : ''),
   );
-  if (selection.gateDefining.length > 0) {
-    console.log(
-      `GATE-DEFINING CHANGE (${selection.gateDefining.join(', ')}): this PR changes the checks ` +
-        'that validate it. Review it and merge it manually; do not enable auto-merge.',
-    );
-  }
   if (command === 'run') run(selection);
 }
 

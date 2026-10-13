@@ -30,8 +30,8 @@ Task prompts: [docs/ai/prompt-library.md](docs/ai/prompt-library.md). Review sta
    justification in [docs/test-suites.md](docs/test-suites.md) and human approval. **Sanity is
    manual only**: never add it to an automatic pipeline path.
 6. **No infrastructure changes from test work.** Do not modify `Jenkinsfile`, `compose.yaml`,
-   `docker/`, `jenkins/`, `.github/` or Jenkins/Docker state to make tests pass. Those are
-   gate-defining (`.github/gate-defining-paths.json`) and need explicit approval.
+   `docker/`, `jenkins/`, `.github/` or Jenkins/Docker state to make tests pass; such changes need
+   explicit approval. Never merge a PR or answer the Jenkins UAT approval: both are human acts.
 7. **No sensitive data in evidence** (logs, reports, screenshots, traces, docs, commit messages,
    your own output). See [Sensitive data](#sensitive-data).
 8. **No commits, pushes, merges, deletions of tests or new major dependencies** without explicit
