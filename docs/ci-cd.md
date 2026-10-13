@@ -563,10 +563,10 @@ JavaScript, `…number:!0,password:!0`, not data.)
 1. **Merging:** a person merges each PR in GitHub once its required checks passed. Never automatic.
 2. **UAT deployment:** an operator listed in `PARABANK_UAT_APPROVERS` approves each `main` build at
    its UAT Approval stage (or aborts it). Never automatic.
-3. **Jenkins administrator, once (done; verified 2026-10-13):** the queue dispatcher is installed
-   (`parabank-serial-queue` 1.0.0, see "Installation and rollback") and the branch property
-   "Suppress automatic SCM triggering" is set (`main|PR-\d+`, see "Jenkins job and GitHub
-   discovery").
+3. **Jenkins administrator, once:** install the queue dispatcher (see "Installation and
+   rollback") and set the branch property "Suppress automatic SCM triggering" (`main|PR-\d+`, see
+   "Jenkins job and GitHub discovery"). Done: both verified on the real Jenkins on 2026-10-13
+   (`parabank-serial-queue` 1.0.0 installed, property set).
 4. **Optional:** enable "Automatically delete head branches" in GitHub (removes leftover branch
    jobs); delete the stale `feature/ci-jenkins-pipeline` branch; delete `main` #1 (unredacted
    synthetic data, see "Artifacts archived before the log-redaction fix").
