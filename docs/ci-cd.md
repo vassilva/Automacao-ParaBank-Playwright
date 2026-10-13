@@ -226,7 +226,7 @@ time limit (it uses nothing); the RUNNING build is bounded by its 300-min timeou
 
 ### Validation of the scheduling
 
-**Isolated throwaway Jenkins** (`npm run test:queue`): same image (2.541.2 at first; re-run on 2.580.1 on 2026-10-12) and plugin set as the real
+**Isolated throwaway Jenkins** (`npm run test:queue`): same image (2.541.2; for 2.580.1 see "Validation status") and plugin set as the real
 Jenkins, `--network none`, memory-capped, 2 executors; a Multibranch project with the real project's
 name on a local Git repository; a fixture `Jenkinsfile` with the real shape (`agent none`, a
 controller stage, one agent block with a stage timeout). Real Jenkins scheduling, sampled every
@@ -445,15 +445,15 @@ works on Windows as well as Linux.
 
 ## Environments
 
-|                 | QA                                                        | UAT                                                |
-| --------------- | --------------------------------------------------------- | -------------------------------------------------- |
-| Compose project | `parabank-qa`                                             | `parabank-uat`                                     |
-| Local URL       | `http://localhost:8090/parabank/`                         | `http://localhost:8091/parabank/`                  |
-| From the agent  | `http://parabank-qa-parabank-1:8080/parabank/`            | `http://parabank-uat-parabank-1:8080/parabank/`    |
-| Database        | own container, fresh per deploy                           | own container, fresh per deploy                    |
-| Deployed by     | builds whose app image is new to QA (DEPLOY/BUILD)        | MAIN builds whose QA Regression passed (automatic) |
-| Tested with     | Smoke and/or Impacted Tests (PR, push), Regression (main) | Smoke                                              |
-| After the build | left running                                              | left running                                       |
+|                 | QA                                                        | UAT                                              |
+| --------------- | --------------------------------------------------------- | ------------------------------------------------ |
+| Compose project | `parabank-qa`                                             | `parabank-uat`                                   |
+| Local URL       | `http://localhost:8090/parabank/`                         | `http://localhost:8091/parabank/`                |
+| From the agent  | `http://parabank-qa-parabank-1:8080/parabank/`            | `http://parabank-uat-parabank-1:8080/parabank/`  |
+| Database        | own container, fresh per deploy                           | own container, fresh per deploy                  |
+| Deployed by     | builds whose app image is new to QA (DEPLOY/BUILD)        | MAIN builds after QA Regression and UAT Approval |
+| Tested with     | Smoke and/or Impacted Tests (PR, push), Regression (main) | Smoke                                            |
+| After the build | left running                                              | left running                                     |
 
 QA is shared, one pipeline at a time: it runs the current application image and changes only
 when a PR or `main` build brings different application inputs; UAT runs the last image a `main`
@@ -574,8 +574,10 @@ JavaScript, `…number:!0,password:!0`, not data.)
    Security, Pipeline: Multibranch, Pipeline: Groovy Libraries) are resolved: the controller runs
    Jenkins 2.580.1 on Java 21 since 2026-10-12, and on 2026-10-13 none of the update center's
    security warnings matched the core or any of the 98 installed plugins. Re-check after each
-   update-center refresh (Manage Jenkins shows the warnings); after any Jenkins upgrade, run
-   `npm run test:queue` against the new image before relying on the serial-queue plugin.
+   update-center refresh (Manage Jenkins shows the warnings). After any Jenkins upgrade, run
+   `npm run test:queue` against the new image before relying on the serial-queue plugin; on
+   2.580.1 the harness first needs the Jenkins URL configured in its throwaway instance (see
+   "Validation status").
 
 ## Failure, rollback and recovery
 
@@ -644,7 +646,14 @@ and #13 together queued `PR-14` #5 and `PR-13` #5 at the same time: `PR-13` #5 g
 wait), i.e. it was held in the queue, not on an executor. `scripts/ci/build-overlap.ts` on the real build records (copied 2026-10-13, judged since the
 upgrade window 2026-10-12T17:33Z): 18 builds judged, 0 overlapping RUNNING pairs; the queued builds
 carry their measured time blocked in the queue (`PR-13` #5 364 s, `PR-17` #1 542 s, `PR-18` #1
-1,506 s).
+1,506 s). Those PRs were later closed without merging (owner's change of scope); their builds
+remain valid scheduling evidence.
+
+**`npm run test:queue` on Jenkins 2.580.1:** the harness in this repository was written for 2.541.2.
+Jenkins 2.580.1 refuses CLI connections until the Jenkins URL is configured, so the throwaway
+instance must get a `jenkins.model.JenkinsLocationConfiguration.xml` (`http://localhost:8080/`)
+before it starts. With that local, unmerged adjustment the harness passed on the 2.580.1 image on
+2026-10-12 (0 failed steps, 0 overlapping builds); without it, it cannot drive a 2.580.1 instance.
 
 **Isolated throwaway Jenkins** (same image and plugin set, no network): the official Declarative
 linter validates this `Jenkinsfile`; earlier runs there proved the sandboxed flag lookup, UNSTABLE →
