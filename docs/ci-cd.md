@@ -226,7 +226,7 @@ time limit (it uses nothing); the RUNNING build is bounded by its 300-min timeou
 
 ### Validation of the scheduling
 
-**Isolated throwaway Jenkins** (`npm run test:queue`): same image (2.541.2) and plugin set as the real
+**Isolated throwaway Jenkins** (`npm run test:queue`): same image (2.541.2; for 2.580.1 see "Validation status") and plugin set as the real
 Jenkins, `--network none`, memory-capped, 2 executors; a Multibranch project with the real project's
 name on a local Git repository; a fixture `Jenkinsfile` with the real shape (`agent none`, a
 controller stage, one agent block with a stage timeout). Real Jenkins scheduling, sampled every
@@ -283,7 +283,7 @@ repository (not from the Jenkins update center): it uses only long-stable core A
 | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Attack surface | No HTTP endpoint, form, permission, credential, network access, script evaluation or file I/O of its own (only Jenkins' `Queue.save()`); runs inside the queue maintenance, on no user input                                                                                                                                        |
 | Dependencies   | Bundles nothing (the `.hpi` holds only its own jar: two classes); direct dependencies `jenkins-core` 2.541.2, `jakarta.servlet-api`, `commons-logging`, all `provided` by Jenkins. The build verifies every download's checksum (`mvn -C`)                                                                                          |
-| Compatibility  | Manifest `Jenkins-Version: 2.541.2` (the minimum; the real Jenkins is 2.541.2), bytecode Java 17 (the real Jenkins runs 17.0.18), no plugin dependency; core APIs stable for many years. After a Jenkins upgrade: run `npm run test:queue` with the new image before relying on it                                                  |
+| Compatibility  | Manifest `Jenkins-Version: 2.541.2` (the minimum; the real Jenkins runs 2.580.1 since 2026-10-12), bytecode Java 17 (the real Jenkins runs Java 21), no plugin dependency; core APIs stable for many years. After a Jenkins upgrade: run `npm run test:queue` with the new image before relying on it                               |
 | Concurrency    | `canRun` reads queue and executor snapshots; its own state is a synchronized set and an atomic flag; the queue save runs on Jenkins' timer, outside the queue lock, at most one at a time                                                                                                                                           |
 | Failure modes  | Check error: the ParaBank build stays queued (fail closed, reason shown). Plugin missing, disabled or the job renamed: builds are serialized by the fallback lock only, with the `WARNING`. A ParaBank build that started another ParaBank build and waited for it would wait until its timeout (the `Jenkinsfile` never does this) |
 | Exposure       | Queue reasons name the holding build (visible to logged-in users, as the queue already is); log line names the serialized project                                                                                                                                                                                                   |
@@ -445,15 +445,15 @@ works on Windows as well as Linux.
 
 ## Environments
 
-|                 | QA                                                        | UAT                                                |
-| --------------- | --------------------------------------------------------- | -------------------------------------------------- |
-| Compose project | `parabank-qa`                                             | `parabank-uat`                                     |
-| Local URL       | `http://localhost:8090/parabank/`                         | `http://localhost:8091/parabank/`                  |
-| From the agent  | `http://parabank-qa-parabank-1:8080/parabank/`            | `http://parabank-uat-parabank-1:8080/parabank/`    |
-| Database        | own container, fresh per deploy                           | own container, fresh per deploy                    |
-| Deployed by     | builds whose app image is new to QA (DEPLOY/BUILD)        | MAIN builds whose QA Regression passed (automatic) |
-| Tested with     | Smoke and/or Impacted Tests (PR, push), Regression (main) | Smoke                                              |
-| After the build | left running                                              | left running                                       |
+|                 | QA                                                        | UAT                                              |
+| --------------- | --------------------------------------------------------- | ------------------------------------------------ |
+| Compose project | `parabank-qa`                                             | `parabank-uat`                                   |
+| Local URL       | `http://localhost:8090/parabank/`                         | `http://localhost:8091/parabank/`                |
+| From the agent  | `http://parabank-qa-parabank-1:8080/parabank/`            | `http://parabank-uat-parabank-1:8080/parabank/`  |
+| Database        | own container, fresh per deploy                           | own container, fresh per deploy                  |
+| Deployed by     | builds whose app image is new to QA (DEPLOY/BUILD)        | MAIN builds after QA Regression and UAT Approval |
+| Tested with     | Smoke and/or Impacted Tests (PR, push), Regression (main) | Smoke                                            |
+| After the build | left running                                              | left running                                     |
 
 QA is shared, one pipeline at a time: it runs the current application image and changes only
 when a PR or `main` build brings different application inputs; UAT runs the last image a `main`
@@ -565,16 +565,19 @@ JavaScript, `…number:!0,password:!0`, not data.)
    its UAT Approval stage (or aborts it). Never automatic.
 3. **Jenkins administrator, once:** install the queue dispatcher (see "Installation and
    rollback") and set the branch property "Suppress automatic SCM triggering" (`main|PR-\d+`, see
-   "Jenkins job and GitHub discovery").
+   "Jenkins job and GitHub discovery"). Done: both verified on the real Jenkins on 2026-10-13
+   (`parabank-serial-queue` 1.0.0 installed, property set).
 4. **Optional:** enable "Automatically delete head branches" in GitHub (removes leftover branch
    jobs); delete the stale `feature/ci-jenkins-pipeline` branch; delete `main` #1 (unredacted
    synthetic data, see "Artifacts archived before the log-redaction fix").
-5. **Security updates (found 2026-10-11, independent of the pipeline):** Jenkins 2.541.2 is
-   affected by the core advisory of 2026-09-02 (high; fixed in LTS 2.568.3), and the installed
-   Script Security 1399 by the sandbox-bypass advisories of 2026-09-02 and 2026-09-16 (high; fixed in
-   1422); Pipeline: Multibranch 821 (low; fixed in 842) and Pipeline: Groovy Libraries 787 (medium;
-   fixed in 806) too. Upgrade them, then run `npm run test:queue` against the upgraded image before
-   relying on the serial-queue plugin again.
+5. **Security updates:** the advisories found on 2026-10-11 (Jenkins 2.541.2 core, Script
+   Security, Pipeline: Multibranch, Pipeline: Groovy Libraries) are resolved: the controller runs
+   Jenkins 2.580.1 on Java 21 since 2026-10-12, and on 2026-10-13 none of the update center's
+   security warnings matched the core or any of the 98 installed plugins. Re-check after each
+   update-center refresh (Manage Jenkins shows the warnings). After any Jenkins upgrade, run
+   `npm run test:queue` against the new image before relying on the serial-queue plugin; on
+   2.580.1 the harness first needs the Jenkins URL configured in its throwaway instance (see
+   "Validation status").
 
 ## Failure, rollback and recovery
 
@@ -613,7 +616,12 @@ Records are dated; each describes the policy in force at that time (until 2026-1
 no UAT stage; rejected or timed out → ABORTED, nothing deployed; unauthorized or unconfigured →
 FAILURE; Regression failure → no approval requested; CD success requires `UAT_APPROVED`); the
 approval stage code run on an isolated Jenkins 2.580.1 (see "Manual UAT approval"); the Jenkinsfile
-accepted by the 2.580.1 Declarative linter. Real `main` builds with a human approval: pending.
+accepted by the 2.580.1 Declarative linter. Real `main` build with a human approval: `main` #13
+(2026-10-13, merge of #16, `3bd9042`): Quality Gates (CI tests 115/115), QA Regression 24/24, UAT
+Approval requested and approved by the authorized operator, UAT Promotion verified (deployment not
+required: UAT already ran the validated image `sha256:ce686b92…`, same as QA), UAT Smoke 4/4,
+Validation Complete, SUCCESS. Not yet exercised for real: an approved build that redeploys UAT
+(the next `main` build bringing a new application image).
 
 **Real Jenkins and GitHub (2026-10-10), previous designs of this pipeline:**
 
@@ -631,11 +639,21 @@ automatic UAT promotion, UAT Smoke); the same scan also started the merged branc
 `ci/serialized-pipeline-auto-uat` #1, RUNNING alongside it and waiting for the lock: the defect
 "Scheduling" fixes.
 
-**Queue-level scheduling (plugin) and branch triggering: not yet validated on the real Jenkins.**
-The plugin is not installed there and the branch property is not set (administrator steps,
-"Installation and rollback"). Until then the real Jenkins still runs with the fallback lock only.
-Real validation: `build-overlap.ts` on the real build records after the next builds, plus the Build
-Queue showing a held build with the plugin reason.
+**Queue-level scheduling (plugin) and branch triggering on the real Jenkins (2026-10-13):** the
+plugin is installed and the branch property is set (verified in `$JENKINS_HOME`). Updating PRs #14
+and #13 together queued `PR-14` #5 and `PR-13` #5 at the same time: `PR-13` #5 got its build record
+(left the queue) 4.4 s after `PR-14` #5 finished and acquired the fallback lock at once (no lock
+wait), i.e. it was held in the queue, not on an executor. `scripts/ci/build-overlap.ts` on the real build records (copied 2026-10-13, judged since the
+upgrade window 2026-10-12T17:33Z): 18 builds judged, 0 overlapping RUNNING pairs; the queued builds
+carry their measured time blocked in the queue (`PR-13` #5 364 s, `PR-17` #1 542 s, `PR-18` #1
+1,506 s). Those PRs were later closed without merging (owner's change of scope); their builds
+remain valid scheduling evidence.
+
+**`npm run test:queue` on Jenkins 2.580.1:** the harness in this repository was written for 2.541.2.
+Jenkins 2.580.1 refuses CLI connections until the Jenkins URL is configured, so the throwaway
+instance must get a `jenkins.model.JenkinsLocationConfiguration.xml` (`http://localhost:8080/`)
+before it starts. With that local, unmerged adjustment the harness passed on the 2.580.1 image on
+2026-10-12 (0 failed steps, 0 overlapping builds); without it, it cannot drive a 2.580.1 instance.
 
 **Isolated throwaway Jenkins** (same image and plugin set, no network): the official Declarative
 linter validates this `Jenkinsfile`; earlier runs there proved the sandboxed flag lookup, UNSTABLE →
