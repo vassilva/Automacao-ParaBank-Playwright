@@ -25,6 +25,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import { collectLog } from './log-capture';
+import { BREAK_GLASS_VARIABLE, uatGuard } from './uat-guard';
 import {
   ENVIRONMENTS,
   composeProject,
@@ -319,6 +320,19 @@ function optionValue(args: string[], option: string): string | undefined {
 function main(): void {
   const [command, target, ...rest] = process.argv.slice(2);
   const args = [target ?? '', ...rest];
+  const guard = uatGuard(
+    command ?? '',
+    target ?? '',
+    { keepRunning: rest.includes('--keep-running') },
+    process.env,
+  );
+  if (!guard.allowed) throw new Error(guard.reason);
+  if (guard.via === 'owner-break-glass') {
+    console.warn(
+      `WARNING: ${command} uat by the owner's break-glass (${BREAK_GLASS_VARIABLE}), outside the ` +
+        'Jenkins UAT Approval. Re-verify UAT: npm run uat:health, TARGET_ENV=uat npm run test:smoke.',
+    );
+  }
   switch (command) {
     case 'deploy':
       return deploy(environmentArg(target), rest[0] ?? recordedImageId());

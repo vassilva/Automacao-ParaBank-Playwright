@@ -179,7 +179,8 @@ async function main(): Promise<void> {
   }
   console.log(`Provenance: ${path.join(OUT_DIR, 'parabank-image.json')}`);
   console.log(
-    'Deploy it (by image ID, recorded above): npm run qa:deploy, then npm run uat:deploy',
+    'Deploy it to QA (by image ID, recorded above): npm run qa:deploy. UAT receives it only from a ' +
+      'main build after the manual UAT Approval in Jenkins.',
   );
 }
 

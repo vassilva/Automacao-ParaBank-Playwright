@@ -356,6 +356,26 @@ the Jenkinsfile (2026-10-13): authorized approval → promotion ran, SUCCESS; re
 1-minute timeout → ABORTED; administrator outside the list → accepted by Jenkins, then refused by
 the stage → FAILURE, no promotion; empty list → FAILURE before asking.
 
+## UAT changes outside Jenkins
+
+`scripts/environment.ts` refuses `deploy uat`, and a `teardown uat` that removes UAT, unless it runs
+in a Jenkins build whose UAT Approval recorded an approver (`UAT_APPROVER`, set by the Jenkinsfile
+after the approval) or the repository owner sets `PARABANK_UAT_BREAK_GLASS=owner` for that one
+command (documented rollback or recovery; it prints a warning). `npm run uat:deploy` is therefore
+refused locally. `start`, `stop`, `status`, `health` and `identity` are unchanged; QA is unaffected.
+Tests: `scripts/ci/tests/uat-guard.test.ts`.
+
+This stops accidental and automated UAT changes (a script, a habit, an AI agent). **It is not a
+security boundary:** anyone who can reach the Docker daemon can change UAT with `docker compose`,
+and anyone who can administer Jenkins can change the pipeline or its approver list. The real
+boundary is who holds that access:
+
+| Who can change UAT                        | How                                                                                                                                        | Least-privilege mitigation (owner decision)                                                                                                    |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Any user of this machine's Docker Desktop | `docker compose -p parabank-uat ...` or the break-glass                                                                                    | Docker Desktop is single-user here: keep the Windows account the only Docker user; never expose the daemon on TCP.                             |
+| Any logged-in Jenkins user                | Authorization is "Logged-in users can do anything": edit `PARABANK_UAT_APPROVERS`, Replay a build with a changed Jenkinsfile, run a script | Matrix-based authorization: only the owner administers; other accounts read-only or removed; Replay restricted to administrators.              |
+| Every Jenkins build                       | The controller and the build agent mount the Docker socket (root-equivalent on the Docker host)                                            | Inherent to building and deploying with the host daemon; keep Jenkins on 127.0.0.1, builds only from this repository's branches (no fork PRs). |
+
 ## Roles: push validation by branch prefix
 
 Push builds run only when started manually (Build Now on the branch job): only `main` and `PR-<n>`
@@ -445,15 +465,15 @@ works on Windows as well as Linux.
 
 ## Environments
 
-|                 | QA                                                        | UAT                                                |
-| --------------- | --------------------------------------------------------- | -------------------------------------------------- |
-| Compose project | `parabank-qa`                                             | `parabank-uat`                                     |
-| Local URL       | `http://localhost:8090/parabank/`                         | `http://localhost:8091/parabank/`                  |
-| From the agent  | `http://parabank-qa-parabank-1:8080/parabank/`            | `http://parabank-uat-parabank-1:8080/parabank/`    |
-| Database        | own container, fresh per deploy                           | own container, fresh per deploy                    |
-| Deployed by     | builds whose app image is new to QA (DEPLOY/BUILD)        | MAIN builds whose QA Regression passed (automatic) |
-| Tested with     | Smoke and/or Impacted Tests (PR, push), Regression (main) | Smoke                                              |
-| After the build | left running                                              | left running                                       |
+|                 | QA                                                        | UAT                                              |
+| --------------- | --------------------------------------------------------- | ------------------------------------------------ |
+| Compose project | `parabank-qa`                                             | `parabank-uat`                                   |
+| Local URL       | `http://localhost:8090/parabank/`                         | `http://localhost:8091/parabank/`                |
+| From the agent  | `http://parabank-qa-parabank-1:8080/parabank/`            | `http://parabank-uat-parabank-1:8080/parabank/`  |
+| Database        | own container, fresh per deploy                           | own container, fresh per deploy                  |
+| Deployed by     | builds whose app image is new to QA (DEPLOY/BUILD)        | MAIN builds after QA Regression and UAT Approval |
+| Tested with     | Smoke and/or Impacted Tests (PR, push), Regression (main) | Smoke                                            |
+| After the build | left running                                              | left running                                     |
 
 QA is shared, one pipeline at a time: it runs the current application image and changes only
 when a PR or `main` build brings different application inputs; UAT runs the last image a `main`
@@ -562,7 +582,8 @@ JavaScript, `…number:!0,password:!0`, not data.)
 
 1. **Merging:** a person merges each PR in GitHub once its required checks passed. Never automatic.
 2. **UAT deployment:** an operator listed in `PARABANK_UAT_APPROVERS` approves each `main` build at
-   its UAT Approval stage (or aborts it). Never automatic.
+   its UAT Approval stage (or aborts it). Never automatic. Outside Jenkins, UAT changes are refused
+   (see "UAT changes outside Jenkins").
 3. **Jenkins administrator, once:** install the queue dispatcher (see "Installation and
    rollback") and set the branch property "Suppress automatic SCM triggering" (`main|PR-\d+`, see
    "Jenkins job and GitHub discovery").
@@ -585,8 +606,9 @@ JavaScript, `…number:!0,password:!0`, not data.)
   PR; the next `main` build re-validates.
 - **UAT readiness or UAT Smoke fails after a deployment:** FAILURE, no deployment record; UAT runs
   the new image. Roll UAT back to the last image whose UAT Smoke passed (authorized operation):
-  `docker image inspect parabank-uat:current --format '{{.Id}}'`, then
-  `npm run -s env -- deploy uat <that ID>`, `npm run uat:health`, `TARGET_ENV=uat npm run test:smoke`.
+  `docker image inspect parabank-uat:current --format '{{.Id}}'`, then, as the repository owner,
+  `PARABANK_UAT_BREAK_GLASS=owner npm run -s env -- deploy uat <that ID>` (break-glass, see "UAT
+  changes outside Jenkins"), `npm run uat:health`, `TARGET_ENV=uat npm run test:smoke`.
   Then fix forward through a PR.
 - **A build is QUEUED ("ParaBank serial queue: waiting for … to finish"):** normal; it starts when
   the named build finishes. Never cancel the running build to make room.

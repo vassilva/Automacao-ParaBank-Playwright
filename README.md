@@ -144,7 +144,7 @@ loopback ports only. Each one is deployed, started, stopped and health-checked o
 ```powershell
 npm run app:build          # BUILD ONCE: source-built image, ID recorded in build/parabank-image.json
 npm run qa:deploy          # fresh QA container (fresh database) from that image ID
-npm run uat:deploy         # PROMOTE: the same image ID to UAT (never a rebuild)
+npm run uat:deploy         # REFUSED outside Jenkins: UAT changes only after the UAT Approval (below)
 npm run env:identity       # fails unless QA and UAT run the same image ID (Docker metadata)
 npm run qa:health          # container healthy + application serving (uat:health likewise)
 npm run qa:status          # container, state, health, image ID, port
@@ -154,7 +154,10 @@ npm run test:smoke                          # against QA (default)
 $env:TARGET_ENV = 'uat'; npm run test:smoke # the same tests against UAT (Bash: TARGET_ENV=uat ...)
 ```
 
-`npm run env -- deploy uat <image ID>` deploys an explicit image ID. `compose.yaml` has no
+`npm run env -- deploy qa <image ID>` deploys an explicit image ID. UAT is promoted only by a `main`
+build after its manual UAT Approval in Jenkins; `deploy uat` (and a `teardown uat` that removes UAT)
+is refused anywhere else, except the repository owner's documented break-glass
+(`PARABANK_UAT_BREAK_GLASS=owner`, see [docs/ci-cd.md](docs/ci-cd.md#uat-changes-outside-jenkins)). `compose.yaml` has no
 default image: an environment can only be created from an explicit image ID, so it can never
 fall back silently to another image. State: ParaBank keeps its data in the container's embedded
 HSQLDB; stop/start keeps it, a deploy starts from the image's seed data. Scenarios do not depend
