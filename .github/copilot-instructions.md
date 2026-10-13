@@ -13,5 +13,5 @@ read and follow it. This file only repeats the non-negotiables for surfaces that
   Sanity is manual only. Known-defect scenarios keep their registered proofs.
 - Never put passwords, usernames, SSNs, session ids, cookies or tokens in logs, reports,
   screenshots, traces, docs or suggestions.
-- Gate-defining files (`.github/gate-defining-paths.json`) need the owner's review; never change
+- Never merge a pull request or answer the Jenkins UAT approval: both are human acts. Never change
   Jenkins, Docker or GitHub protections to make tests pass.

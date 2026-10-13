@@ -37,8 +37,7 @@ Task prompts: [docs/ai/prompt-library.md](docs/ai/prompt-library.md). Review sta
 7. **No sensitive data in evidence** (logs, reports, screenshots, traces, docs, commit messages,
    your own output). See [Sensitive data](#sensitive-data).
 8. **No commits, pushes, merges, deletions of tests or new major dependencies** without explicit
-   human approval. A gate-defining PR also needs the owner's review (docs/ci-cd.md, "gate-review");
-   an agent never adds that review or the `gate-change-reviewed` label itself.
+   human approval.
 
 ## Where code goes
 
