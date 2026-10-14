@@ -288,7 +288,8 @@ regression 27/27 in one run (28.5 s, 379 requests, 0 HTTP 429, 0 HTTP 403; non-2
 expected 400/401/302). Recreating DEV from the same image (same image ID, marker customer gone,
 seed present) followed by smoke: 4/4.
 
-Future build once / promote (not implemented): one pipeline run builds `parabank-local:<commit>`
+Build once / promote, as first designed here (historical; implemented since 2026-10-10 for QA →
+UAT, see [docs/ci-cd.md](ci-cd.md#build-once-promote-the-same-image)): one pipeline run builds `parabank-local:<commit>`
 once and records its image ID. DEV runs `PARABANK_IMAGE=<that image>`, then smoke, regression and
 the quality gate. QA then runs `PARABANK_ENV=qa PARABANK_PORT=… PARABANK_IMAGE=<same image ID or
 registry digest>`. The image is never rebuilt between DEV and QA; `npm run dev:image` (and the same
