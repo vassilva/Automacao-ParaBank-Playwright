@@ -53,7 +53,9 @@ patterns (`npm run lint` passes once used).
 > Implement {scenarios} in {feature file}. Reuse existing steps first (list the ones reused, found
 > with `npm run test:dry-run` and grep). Add new steps only to the domain step file, thin, with
 > business assertions on persisted state; selectors and actions only in src/pages; data only from
-> src/factories. Tag each scenario with one area, one priority and the approved suite tags. Do
+> src/factories. Use web-first assertions (`expect` from src/support/assertions.ts, which carries
+> the configured timeout) and actions that wait for the bank's answer; never a sleep or a fixed
+> timeout. Tag each scenario with one area, one priority and the approved suite tags. Do
 > not create any Playwright spec. Then run the mandatory validation in AGENTS.md and report it.
 
 **Output:** the diff, the list of reused vs new steps, validation commands with real results.
@@ -77,8 +79,10 @@ patterns (`npm run lint` passes once used).
 ## 5. Flaky-test investigation
 
 **Purpose:** root cause of an intermittent failure.
-**Inputs:** `{scenario}`, `{failing and passing run evidence}` (redacted reports, JUnit, screenshot
-notes, `NET_DIAG` output), `{environment state}`.
+**Inputs:** `{scenario}`, `{failing and passing run evidence}` (the failure record
+`reports/<env>/<suite>/failures/<scenario>-<id>.json` with its step and request timeline, the
+masked screenshot, JUnit, `NET_DIAG` output), `{environment state}`. A full Playwright trace is a
+local-only input (`PW_TRACE_ON_FAILURE=true`); never paste its contents.
 
 > Investigate why {scenario} fails intermittently. Classify first with docs/failure-triage.md.
 > Compare failing and passing evidence; identify the exact step, the state the test assumed and
@@ -126,6 +130,8 @@ collect next), minimal fix.
 > persisted state through src/api/parabank-client.ts (the endpoints the UI itself calls). Propose
 > an API check only where it covers a rule not already proven, explain why the UI layer cannot,
 > and implement it as a Gherkin scenario using the existing client. No new framework or runner.
+> The client already fails on any non-2xx status; assert response schema or response time only
+> when a requirement states one (none does today; runtime contracts were closed with #13).
 
 **Output:** gap → evidence → proposal or "no gap" with reasoning.
 **Acceptance:** no business rule ends up asserted twice without a reason.
@@ -139,7 +145,8 @@ collect next), minimal fix.
 > Sanity only on manual parameter, known defects never gating, queue-level serialization and
 > duplicate-build prevention intact, no sensitive data in archived artifacts. Report findings and
 > recommendations only; do not edit the Jenkinsfile, Jenkins or Docker, and do not propose GitHub
-> Actions or parallel stages.
+> Actions or parallel stages. Also check that the evidence scan runs before JUnit and the archive,
+> that failed scenarios leave their failure record and that no Playwright trace is produced.
 
 **Output:** findings with evidence and recommendations, each marked "needs approval".
 **Acceptance:** no file changed; every claim cites the Jenkinsfile line or build record.
@@ -147,7 +154,9 @@ collect next), minimal fix.
 ## 10. Failure explanation
 
 **Purpose:** explain one failure for a defect report or triage.
-**Inputs:** `{redacted failure output}`, `{scenario}`, `{suite and environment}`.
+**Inputs:** the failure record (`failures/<scenario>-<id>.json`: failed step, error, expected and
+actual, project stack frames, environment, build, timeline), `{scenario}`, `{suite and
+environment}`.
 
 > Explain the failure of {scenario}. Classify it with docs/failure-triage.md; quote the failing
 > step and the redacted error; state expected vs actual business outcome; for a known-defect
