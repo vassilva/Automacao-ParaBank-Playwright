@@ -34,6 +34,7 @@
     "ci:config-check": "ts-node scripts/ci/config-check.ts",
     "ci:bdd": "ts-node scripts/ci/verify-bdd-structure.ts",
     "ci:app-image": "ts-node scripts/ci/app-image.ts",
+    "ci:evidence-scan": "ts-node scripts/ci/evidence-scan.ts",
     "test:ci": "node --require ts-node/register --test \"scripts/ci/tests/*.test.ts\"",
     "test:lock": "sh scripts/ci/tests/pipeline-lock.test.sh",
     "test:queue": "sh scripts/ci/tests/queue-serialization/run.sh",
