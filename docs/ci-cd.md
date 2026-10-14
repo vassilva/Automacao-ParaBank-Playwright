@@ -527,6 +527,18 @@ shapes of this suite's generated credentials and every SSN-shaped value are mask
 still looks like a credential is withheld. Replayed on the logs of the first two Jenkins builds:
 0 credential values remain, and all 73 "Tests run" lines (used for the test totals) are kept.
 
+**Failure evidence:** each failed scenario writes `failures/<scenario>-<id>.json` (the failure
+record: failed step, error, expected/actual, stack frames, environment, browser, `BUILD_TAG`,
+timeline of steps, request shapes and errors) and `.png` (masked screenshot) into its suite's
+reports folder, so they are scanned, then archived with the reports; a failed test stage still
+fails the build (the post section never sets SUCCESS) and the lock is still released. Raw
+Playwright traces stay out of CI (`PW_TRACE_ON_FAILURE = 'false'`): they cannot be redacted. Drilled
+on 2026-10-14 against a throwaway ParaBank (never QA/UAT) with a temporary scenario expecting a
+refusal after a valid sign-in: Cucumber exit 1, JUnit `failures="1"`, record with the failed step
+and expected/received, screenshot with credentials and the customer's name masked, evidence scan
+OK; with a password-shaped value planted in the record, `--quarantine` removed only that file and
+never printed the value.
+
 **Evidence scan before publishing** (`scripts/ci/evidence-scan.ts`, `npm run ci:evidence-scan --
 <dir>...`): redaction happens where evidence is written; this checks the result. In the agent
 block's `post`, after the container logs are saved and before JUnit is published or anything is

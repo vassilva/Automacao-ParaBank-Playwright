@@ -40,7 +40,14 @@ distinguishes the three cases.
 ## 3. Collect evidence safely
 
 Evidence is redacted by default (`src/support/evidence.ts`, `playwright/redacting-reporter.ts`);
-failure screenshots mask credential and identity fields.
+failure screenshots mask credential and identity fields. **In Jenkins**, open the failed build:
+
+- **Tests** (JUnit): the failed scenario and its assertion message;
+- **Artifacts** → `reports/<qa|uat>/<suite>/failures/`: `<scenario>-<id>.json` (failed step,
+  error, expected/actual, stack frames, environment, browser, build, timeline) and `.png` (masked
+  screenshot); `cucumber-report.html` in the same folder shows them per scenario;
+- **Console**: `EVIDENCE SCAN` lines; a file listed as `SENSITIVE` was removed before publishing
+  and the build failed for that reason too.
 
 | Need                      | How                                                                 | Sensitive-data note                                                                |
 | ------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
