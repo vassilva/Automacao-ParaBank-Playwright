@@ -437,6 +437,8 @@ compare such values in memory; only the evidence layer is sanitized, never the a
   [docs/functional-coverage.md](docs/functional-coverage.md#artifact-classification-sensitive-data).
 - **Assertions** that involve identity data compare in memory and print only a boolean (SSN,
   recovered username); API response bodies are never logged.
+- **Project status** (Master Execution Plan checklist, what remains and why):
+  [docs/project-status.md](docs/project-status.md).
 - **Pipeline and environment access** (who can merge, approve UAT or reach Docker; Jenkins
   authorization, backups and clean-up proposals): [docs/security-hardening.md](docs/security-hardening.md).
 - **Authorization checks** are functional only: they use two synthetic customers created by the
