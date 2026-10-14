@@ -144,7 +144,7 @@ loopback ports only. Each one is deployed, started, stopped and health-checked o
 ```powershell
 npm run app:build          # BUILD ONCE: source-built image, ID recorded in build/parabank-image.json
 npm run qa:deploy          # fresh QA container (fresh database) from that image ID
-npm run uat:deploy         # PROMOTE: the same image ID to UAT (never a rebuild)
+npm run uat:deploy         # OWNER ROLLBACK ONLY: bypasses the Jenkins UAT Approval (below)
 npm run env:identity       # fails unless QA and UAT run the same image ID (Docker metadata)
 npm run qa:health          # container healthy + application serving (uat:health likewise)
 npm run qa:status          # container, state, health, image ID, port
@@ -154,7 +154,10 @@ npm run test:smoke                          # against QA (default)
 $env:TARGET_ENV = 'uat'; npm run test:smoke # the same tests against UAT (Bash: TARGET_ENV=uat ...)
 ```
 
-`npm run env -- deploy uat <image ID>` deploys an explicit image ID. `compose.yaml` has no
+`npm run env -- deploy qa <image ID>` deploys an explicit image ID. UAT is promoted by Jenkins: a
+`main` build after QA Regression and the manual UAT Approval ([docs/ci-cd.md](docs/ci-cd.md)).
+`npm run uat:deploy` and `env -- deploy uat` skip that approval; they exist for the owner's
+documented rollback only ([docs/security-hardening.md](docs/security-hardening.md)). `compose.yaml` has no
 default image: an environment can only be created from an explicit image ID, so it can never
 fall back silently to another image. State: ParaBank keeps its data in the container's embedded
 HSQLDB; stop/start keeps it, a deploy starts from the image's seed data. Scenarios do not depend
@@ -417,6 +420,8 @@ compare such values in memory; only the evidence layer is sanitized, never the a
   [docs/functional-coverage.md](docs/functional-coverage.md#artifact-classification-sensitive-data).
 - **Assertions** that involve identity data compare in memory and print only a boolean (SSN,
   recovered username); API response bodies are never logged.
+- **Pipeline and environment access** (who can merge, approve UAT or reach Docker; Jenkins
+  authorization, backups and clean-up proposals): [docs/security-hardening.md](docs/security-hardening.md).
 - **Authorization checks** are functional only: they use two synthetic customers created by the
   same scenario, on the controlled QA/UAT environments, with the requests ParaBank's own pages send.
   The suite performs no load, brute-force, enumeration, exploitation or admin-page actions.
