@@ -38,6 +38,7 @@
     "test:ci": "node --require ts-node/register --test \"scripts/ci/tests/*.test.ts\"",
     "test:lock": "sh scripts/ci/tests/pipeline-lock.test.sh",
     "test:queue": "sh scripts/ci/tests/queue-serialization/run.sh",
+    "test:matrix-auth": "sh scripts/ci/tests/matrix-auth-drill/run.sh",
     "audit:test-data": "ts-node scripts/audit-test-data.ts",
     "ci:lock": "sh scripts/ci/pipeline-lock.sh",
     "lint": "eslint .",
