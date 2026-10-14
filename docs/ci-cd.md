@@ -630,6 +630,13 @@ JavaScript, `…number:!0,password:!0`, not data.)
 Records are dated; each describes the policy in force at that time (until 2026-10-13: the
 `gate-review` check and automatic UAT promotion).
 
+**Integrated `main` (2026-10-14):** PRs #20 to #23 merged; `main` #15 to #18 (one per merge, the
+last on `b6cacfa`): SUCCESS each, application image reused (no build), QA Regression 24/24, UAT
+Approval answered by the authorized owner, UAT deployment not required (UAT already ran
+`sha256:ce686b92…`, same as QA; the UAT container dates from `main` #5 and was not recreated), UAT
+Smoke 4/4, evidence scan OK, then lock release, JUnit and archive in that order. `build-overlap.ts`
+on the retained records since the upgrade: 11 builds, 0 overlapping.
+
 **Manual merge only, manual UAT approval (2026-10-13):** pipeline model tests (approval pending →
 no UAT stage; rejected or timed out → ABORTED, nothing deployed; unauthorized or unconfigured →
 FAILURE; Regression failure → no approval requested; CD success requires `UAT_APPROVED`); the
@@ -687,7 +694,7 @@ image's plugins:
 ```sh
 docker run -d --name qit-plugin-source --network none --entrypoint sh jenkins-jenkins:latest   -c 'mkdir -p /var/jenkins_home/plugins && cp -r /usr/share/jenkins/ref/plugins/. /var/jenkins_home/plugins/ && sleep 7200'
 SOURCE_CONTAINER=qit-plugin-source npm run test:queue
-docker rm -f qit-plugin-source
+docker rm -f -v qit-plugin-source   # -v: the image declares a home volume; without it 97 MB stay behind
 ```
 
 Run of 2026-10-14 on the live controller's image (`jenkins-jenkins`, Jenkins 2.580.1) with that

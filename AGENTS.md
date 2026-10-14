@@ -32,6 +32,8 @@ Task prompts: [docs/ai/prompt-library.md](docs/ai/prompt-library.md). Review sta
 6. **No infrastructure changes from test work.** Do not modify `Jenkinsfile`, `compose.yaml`,
    `docker/`, `jenkins/`, `.github/` or Jenkins/Docker state to make tests pass; such changes need
    explicit approval. Never merge a PR or answer the Jenkins UAT approval: both are human acts.
+   Never run `npm run uat:deploy` (or `env -- deploy uat`): it skips that approval and is the
+   owner's rollback tool only ([docs/security-hardening.md](docs/security-hardening.md)).
 7. **No sensitive data in evidence** (logs, reports, screenshots, traces, docs, commit messages,
    your own output). See [Sensitive data](#sensitive-data).
 8. **No commits, pushes, merges, deletions of tests or new major dependencies** without explicit
@@ -129,6 +131,7 @@ npm run ci:bdd -- --total 77 --known-defects 25        # update the totals only 
 npm run ci:coverage -- --suite smoke --expect 4         # likewise regression 24, sanity 10, full 52
 npm run check:target; npm run test:smoke; npm run test:regression   # needs QA up (npm run qa:health)
 npm run test:known-defects                              # when touching a known-defect scenario or proof
+npm run ci:evidence-scan -- reports                     # when touching redaction, reporting or logging
 ```
 
 Never run Sanity automatically. Report the commands you actually ran and their real results; a
