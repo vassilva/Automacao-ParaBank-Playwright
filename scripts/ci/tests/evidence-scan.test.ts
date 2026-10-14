@@ -6,7 +6,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
-import { DETECTORS, scanPaths, scanText } from '../evidence-scan';
+import { deflateRawSync } from 'node:zlib';
+import { DETECTORS, scanFile, scanPaths, scanText, zipEntries } from '../evidence-scan';
 
 const PASSWORD = 'PwSyntheticValue0001'; // "Pw" + 16 base64url characters
 const USERNAME = 'qa0synthetic01'; // "qa" + lowercase letters and digits
@@ -138,13 +139,116 @@ describe('evidence scan: files and the command line', () => {
   });
 });
 
-describe('evidence scan: wired into the Jenkinsfile before archiving', () => {
-  const jenkinsfile = readFileSync('Jenkinsfile', 'utf8');
+/** A minimal zip (deflated entries, central directory), like the one a Playwright report embeds. */
+function zip(entries: Record<string, string | Buffer>): Buffer {
+  const locals: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  for (const [name, content] of Object.entries(entries)) {
+    const data = deflateRawSync(Buffer.from(content));
+    const nameBytes = Buffer.from(name);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt16LE(nameBytes.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt32LE(offset, 42);
+    locals.push(local, nameBytes, data);
+    centrals.push(central, nameBytes);
+    offset += 30 + nameBytes.length + data.length;
+  }
+  const directory = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(Object.keys(entries).length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, directory, end]);
+}
 
-  it('quarantines and fails the build before archiveArtifacts', () => {
-    const scan = jenkinsfile.indexOf('ci:evidence-scan -- --quarantine reports build deployment');
+const playwrightReport = (archive: Buffer) =>
+  `<html><template id="playwrightReportBase64">data:application/zip;base64,${archive.toString('base64')}</template></html>`;
+
+describe('evidence scan: compressed evidence', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'evidence-zip-'));
+  after(() => rmSync(root, { recursive: true, force: true }));
+  const file = (name: string, content: string | Buffer) => {
+    const target = path.join(root, name);
+    writeFileSync(target, content);
+    return target;
+  };
+  const hits = (target: string) => (scanFile(target) ?? []).map(({ detector }) => detector);
+
+  it('reads every entry of a zip (stored size, deflate)', () => {
+    const entries = zipEntries(zip({ 'report.json': '{"ok":true}', 'a/b.json': '[]' }));
+    assert.deepEqual(
+      entries.map(({ name, data }) => [name, data.toString()]),
+      [
+        ['report.json', '{"ok":true}'],
+        ['a/b.json', '[]'],
+      ],
+    );
+  });
+
+  it('finds a leak inside the zip a Playwright HTML report embeds', () => {
+    const report = playwright('leak.html', { 'report.json': `{"title":"login ${PASSWORD}"}` });
+    assert.deepEqual(hits(report), ['password-shape']);
+  });
+
+  it('passes a clean Playwright HTML report and skips image entries inside it', () => {
+    const report = playwright('clean.html', {
+      'report.json': '{"title":"sign in with my password: [REDACTED]"}',
+      'data/shot.png': Buffer.from(base64Noise(64 * 1024), 'base64'),
+    });
+    assert.deepEqual(hits(report), []);
+  });
+
+  it('scans .zip files too', () => {
+    assert.deepEqual(hits(file('evidence.zip', zip({ 'notes.txt': `ssn ${SSN}` }))), [
+      'synthetic-ssn',
+    ]);
+  });
+
+  it('flags a Playwright trace, which can never be redacted', () => {
+    assert.ok(hits(file('trace.zip', zip({ 'test.trace': '{}' }))).includes('playwright-trace'));
+  });
+
+  it('fails closed on evidence it cannot open', () => {
+    assert.deepEqual(hits(file('broken.zip', Buffer.from('not a zip'))), ['unreadable']);
+    const html = file('broken.html', '<template>data:application/zip;base64,AAAA</template>');
+    assert.deepEqual(hits(html), ['unreadable']);
+  });
+
+  function playwright(name: string, entries: Record<string, string | Buffer>): string {
+    return file(name, playwrightReport(zip(entries)));
+  }
+});
+
+describe('evidence scan: wired into the Jenkinsfile before publishing', () => {
+  const jenkinsfile = readFileSync('Jenkinsfile', 'utf8');
+  const scan = jenkinsfile.indexOf('ci:evidence-scan -- --quarantine reports build deployment');
+  const release = jenkinsfile.indexOf('pipeline-lock.sh release', scan);
+  const publishes = jenkinsfile.indexOf('if (scan == 0 || scan == 1)', release);
+  const junit = jenkinsfile.indexOf('junit testResults');
+  const archive = jenkinsfile.indexOf('archiveArtifacts');
+
+  it('scans before JUnit is published and before anything is archived', () => {
+    assert.ok(scan !== -1 && scan < junit && scan < archive);
+    assert.equal(jenkinsfile.indexOf('junit testResults', junit + 1), -1, 'one junit step only');
+  });
+
+  it('fails the build on a finding and on a scan error', () => {
     const fail = jenkinsfile.indexOf("currentBuild.result = 'FAILURE'", scan);
-    const archive = jenkinsfile.indexOf('archiveArtifacts');
-    assert.ok(scan !== -1 && scan < fail && fail < archive);
+    const failAgain = jenkinsfile.indexOf("currentBuild.result = 'FAILURE'", fail + 1);
+    assert.ok(fail !== -1 && failAgain !== -1 && failAgain < release);
+  });
+
+  it('releases the lock first, then publishes only verified evidence (fail closed)', () => {
+    assert.ok(release !== -1 && release < publishes && publishes < junit && junit < archive);
   });
 });

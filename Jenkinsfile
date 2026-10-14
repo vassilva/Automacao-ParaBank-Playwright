@@ -706,7 +706,6 @@ pipeline {
 
       post {
         always {
-          junit testResults: 'reports/qa/**/cucumber-junit.xml, reports/uat/**/cucumber-junit.xml, reports/uat/**/junit.xml', allowEmptyResults: true
           script {
             if (env.PIPELINE_LOCK_HELD == 'true' && fileExists('node_modules')) {
               // QA and UAT stay running (persistent environments). Their logs are saved redacted and
@@ -736,22 +735,26 @@ pipeline {
                 docker image rm "$IMAGE_TAG" || true
               fi
             '''
-            // Verify the redaction before anything is archived: a file with an unmasked sensitive
-            // value is removed from the workspace and the build fails (scripts/ci/evidence-scan.ts).
-            // returnStatus: a scan problem never skips the lock release below.
-            if (fileExists('node_modules')) {
-              def scan = sh(script: 'npm run -s ci:evidence-scan -- --quarantine reports build deployment', returnStatus: true)
-              if (scan != 0) {
-                currentBuild.result = 'FAILURE'
-                echo 'EVIDENCE SCAN FAILED: unmasked sensitive values found; the flagged files were not archived (see above).'
-              }
+            // Verify the redaction before anything is published or archived (JUnit results are kept
+            // by Jenkins too): a file with an unmasked sensitive value is removed from the workspace
+            // and the build fails (scripts/ci/evidence-scan.ts). If the scan itself cannot run,
+            // nothing is published (fail closed). returnStatus: never skips the lock release below.
+            def scan = fileExists('node_modules') ? sh(script: 'npm run -s ci:evidence-scan -- --quarantine reports build deployment', returnStatus: true) : 0
+            if (scan == 1) {
+              currentBuild.result = 'FAILURE'
+              echo 'EVIDENCE SCAN FAILED: unmasked sensitive values found; the flagged files were removed and are not published (see above).'
+            } else if (scan != 0) {
+              currentBuild.result = 'FAILURE'
+              echo "EVIDENCE SCAN ERROR (exit ${scan}): the evidence was not verified, so nothing is published or archived."
             }
-            // Always last, on every outcome; plain sh (works even if npm ci failed). Owner-scoped:
-            // releases only this build's lock.
+            // Plain sh (works even if npm ci failed). Owner-scoped: releases only this build's lock.
             sh 'sh scripts/ci/pipeline-lock.sh release "$BUILD_TAG"'
+            // Traces are never produced in CI; reports and logs are redacted and scanned (docs/ci-cd.md).
+            if (scan == 0 || scan == 1) {
+              junit testResults: 'reports/qa/**/cucumber-junit.xml, reports/uat/**/cucumber-junit.xml, reports/uat/**/junit.xml', allowEmptyResults: true
+              archiveArtifacts artifacts: 'reports/**, build/**, deployment/**', allowEmptyArchive: true
+            }
           }
-          // Traces are never produced in CI; reports and logs are redacted and scanned (docs/ci-cd.md).
-          archiveArtifacts artifacts: 'reports/**, build/**, deployment/**', allowEmptyArchive: true
         }
       }
     }
