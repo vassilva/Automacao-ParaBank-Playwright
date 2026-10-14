@@ -17,8 +17,10 @@ export interface Injection {
   fail?: string;
   skip?: string;
   appImage?: 'REUSE' | 'DEPLOY' | 'BUILD';
-  /** UAT already runs the validated image ID (healthy): no UAT deployment needed. */
+  /** UAT already runs the validated image ID: with a healthy UAT, no deployment is needed. */
   uatRunsValidatedImage?: boolean;
+  /** Docker health of the UAT container at promotion (default healthy; '' = no health/absent). */
+  uatHealth?: 'healthy' | 'unhealthy' | 'starting' | '';
   /** main moved on before the UAT promotion (a newer main build will promote). */
   headMovedBeforePromotion?: boolean;
   /** The pipeline lock could not be acquired within the bounded wait. */
@@ -59,6 +61,29 @@ export function loadStages(file = 'Jenkinsfile'): {
     required[row[1] ?? ''] = [...(row[2] ?? '').matchAll(/'(\w+)'/g)].map((x) => x[1] ?? '');
   }
   return { stages, required };
+}
+
+const VALIDATED_IMAGE = 'sha256:validated';
+
+/**
+ * The UAT Promotion decision exactly as the Jenkinsfile writes it (`env.UAT_DEPLOY_REQUIRED = (...)
+ * ? 'false' : 'true'`), evaluated for what UAT runs (image ID, '' when absent) and its health.
+ */
+export function uatDeployRequired(
+  uatImage: string,
+  uatHealth: string,
+  file = 'Jenkinsfile',
+): string {
+  const line = /env\.UAT_DEPLOY_REQUIRED = (\(.*\) \? 'false' : 'true')/.exec(
+    readFileSync(file, 'utf8'),
+  )?.[1];
+  if (!line) throw new Error('UAT_DEPLOY_REQUIRED decision not found in the Jenkinsfile');
+  const expr = line.replace(/==/g, '===').replace(/!=(?!=)/g, '!==');
+  type Decide = (env: unknown, image: string, health: string) => string;
+  // The Jenkinsfile's own expression (repository content, not input), as for `when` below.
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  const decide = Function('env', 'uatImage', 'uatHealth', `return (${expr});`) as Decide;
+  return decide({ IMAGE_ID: VALIDATED_IMAGE }, uatImage, uatHealth);
 }
 
 /** Mirrors Build Context (role, plan flags). */
@@ -124,7 +149,8 @@ export function simulate(branch: string, changeId: string | null, inject: Inject
     }
     if (s.name === 'UAT Promotion') {
       if (inject.headMovedBeforePromotion) return { result: 'ABORTED (SUPERSEDED)', ran };
-      env.UAT_DEPLOY_REQUIRED = inject.uatRunsValidatedImage ? 'false' : 'true';
+      const uatImage = inject.uatRunsValidatedImage ? VALIDATED_IMAGE : 'sha256:other';
+      env.UAT_DEPLOY_REQUIRED = uatDeployRequired(uatImage, inject.uatHealth ?? 'healthy');
     }
     if (s.name === 'Validation Complete') {
       const req = required[env.PIPELINE_ROLE ?? ''];
