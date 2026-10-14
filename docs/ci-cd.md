@@ -527,6 +527,25 @@ shapes of this suite's generated credentials and every SSN-shaped value are mask
 still looks like a credential is withheld. Replayed on the logs of the first two Jenkins builds:
 0 credential values remain, and all 73 "Tests run" lines (used for the test totals) are kept.
 
+**Evidence scan before publishing** (`scripts/ci/evidence-scan.ts`, `npm run ci:evidence-scan --
+<dir>...`): redaction happens where evidence is written; this checks the result. In the agent
+block's `post`, after the container logs are saved and before JUnit is published or anything is
+archived (Jenkins keeps JUnit failure messages too), every text file under `reports/`, `build/`
+and `deployment/` is scanned for the shapes of the values this suite generates (synthetic SSN,
+password, username; the same `SECRET_SHAPES` that `redact()` masks) and for session ids, cookies
+and authorization headers that are not masked. Compressed evidence is opened: `.zip` files and the
+zip a Playwright HTML report embeds in `index.html` (the optional Known Defects stage writes one),
+entry by entry. A Playwright trace is flagged as such (never allowed in CI). Long base64 runs
+(embedded screenshots) are skipped: random base64 matches the password shape by chance (2 hits in
+1 MB measured), a secret is far shorter. Fail closed: a file that cannot be read or opened is
+flagged. A flagged file is deleted (`--quarantine`) and the build ends FAILURE; the console names
+the file, the detector and the count, never the value. If the scan itself cannot run, nothing is
+published or archived and the build ends FAILURE. The lock is released first in every case.
+Measured on every archive Jenkins kept on 2026-10-13 (19 builds, 92 MB, including 5 ParaBank build
+logs): 18 clean, and `main` #1 flagged (usernames in its container logs), the build archived before
+the log-redaction fix (see below); the local Playwright HTML reports of 2026-10-12 (81 files,
+known defects included): clean.
+
 ### Artifacts archived before the log-redaction fix
 
 The first two builds ran before `scripts/log-redaction.ts`. Their console logs and archived logs
