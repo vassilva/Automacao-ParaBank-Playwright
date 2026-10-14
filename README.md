@@ -313,10 +313,25 @@ Every run writes to `reports/` (git-ignored). `npx playwright test` writes
 - `cucumber-report.json`: machine-readable results
 - `cucumber-junit.xml`: JUnit for CI dashboards
 
-Artifacts are failure-focused. A full-page screenshot (password inputs masked) and the failing
-path are attached only for failed scenarios. If the edge proxy rejected requests during the
-scenario, a note says so, so that rate limiting is not mistaken for a product defect. Videos are
-not recorded. Traces are opt-in (`PW_TRACE_ON_FAILURE=true`) and saved to `reports/traces/`.
+Artifacts are failure-focused: nothing extra is written for a passing scenario. For each failed
+scenario (`src/support/failure-evidence.ts`, written by `src/support/hooks.ts`):
+
+- `failures/<scenario>-<id>.json`: the failure record: feature, scenario, failed step, error type
+  and message, expected and actual (assert and Playwright messages), the project's stack frames
+  first, start and failure time, environment (`qa`/`uat`), page path, browser, Jenkins build
+  (`BUILD_TAG`, `BUILD_URL`; `local` outside Jenkins) and a timeline: every step with status and
+  duration, the last requests as method, path and status, console and page errors;
+- `failures/<scenario>-<id>.png`: full-page screenshot, masked before capture (credential and
+  identity inputs, login-recovery result, welcome headings with the username or name);
+- the same screenshot, a summary and the record attached to the scenario in the Cucumber reports;
+  the failure in `cucumber-junit.xml`;
+- a note when the edge proxy rejected requests (rate limiting is not a product defect).
+
+Everything is redacted (only paths of URLs, no headers, cookies, bodies or form values) and scanned
+before Jenkins publishes it. **No trace in CI:** a Playwright trace stores request bodies,
+cookies, form values and DOM snapshots (ParaBank even embeds the password in a page, PB-18) and
+cannot be redacted; the failure record is its publishable substitute. A full trace is available
+locally only, on demand (`PW_TRACE_ON_FAILURE=true` → `reports/traces/`). Videos are not recorded.
 
 ## Quality gates
 
@@ -406,8 +421,10 @@ compare such values in memory; only the evidence layer is sanitized, never the a
   layer when it is created, so it is masked even if no step stored it; the shapes of generated
   credentials are masked as a safety net. The Playwright adapter redacts again before attaching.
 - **Screenshots:** masked before capture: password, username and SSN inputs, the login-recovery
-  result (prints the credentials, PB-13), the registration greeting (shows the username), and any
-  text showing one of the scenario's generated credentials or SSNs.
+  result (prints the credentials, PB-13), the registration greeting (shows the username), the
+  signed-in sidebar greeting (shows the customer's name), and any text showing one of the
+  scenario's generated credentials or SSNs. Account numbers and balances stay visible: they are
+  synthetic, created per scenario, and what a failure needs to show.
 - **Playwright reports:** Playwright records every action as a report step, and an input step's
   title holds the typed value. `playwright/redacting-reporter.ts` runs before the HTML and JUnit
   reporters and replaces every typed value; other step titles are redacted like error messages.

@@ -8,6 +8,7 @@ import type { CareMessage } from '../pages/customer-care.page';
 import { createPages, type Pages } from '../pages';
 import type { Cents } from '../utils/money';
 import { config } from './config';
+import { FailureTimeline } from './failure-evidence';
 import { captureLedger, type Ledger } from './ledger';
 import { ScenarioTraffic } from './network-diagnostics';
 import { protectedCount, protectedSince } from './redaction';
@@ -59,6 +60,12 @@ export class ParaBankWorld extends World {
   readonly edgeRejections: string[] = [];
   /** Present only when NET_DIAG=true. */
   traffic?: ScenarioTraffic;
+  /** What led to a failure (steps, request shapes, errors), for the failure record. */
+  readonly timeline = new FailureTimeline();
+  /** The first failing step and its (already redacted) error, set by the AfterStep hook. */
+  failure?: { step: string; error: unknown };
+  /** When this scenario's World was created (the scenario start). */
+  readonly startedAt = new Date().toISOString();
 
   /**
    * Set by an action that waited until the page rendered the bank's final answer. Outcome steps
@@ -145,7 +152,17 @@ export class ParaBankWorld extends World {
         );
       }
     });
+    this.context.on('response', (response) => {
+      const type = response.request().resourceType();
+      if (type === 'document' || type === 'xhr' || type === 'fetch') {
+        this.timeline.request(response.request().method(), response.url(), response.status());
+      }
+    });
     this.page = await this.context.newPage();
+    this.page.on('console', (message) => {
+      if (message.type() === 'error') this.timeline.error('console-error', message.text());
+    });
+    this.page.on('pageerror', (error) => this.timeline.error('page-error', error.message));
     this.pages = createPages(this.page);
     this.bank = new ParaBankClient(this.context.request, (method, response) =>
       this.traffic?.record(
