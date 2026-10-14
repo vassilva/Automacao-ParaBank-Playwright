@@ -575,9 +575,8 @@ JavaScript, `…number:!0,password:!0`, not data.)
    Jenkins 2.580.1 on Java 21 since 2026-10-12, and on 2026-10-13 none of the update center's
    security warnings matched the core or any of the 98 installed plugins. Re-check after each
    update-center refresh (Manage Jenkins shows the warnings). After any Jenkins upgrade, run
-   `npm run test:queue` against the new image before relying on the serial-queue plugin; on
-   2.580.1 the harness first needs the Jenkins URL configured in its throwaway instance (see
-   "Validation status").
+   `npm run test:queue` against the new image before relying on the serial-queue plugin (see
+   "Validation status" for the plugin source to use).
 
 ## Failure, rollback and recovery
 
@@ -649,11 +648,27 @@ carry their measured time blocked in the queue (`PR-13` #5 364 s, `PR-17` #1 542
 1,506 s). Those PRs were later closed without merging (owner's change of scope); their builds
 remain valid scheduling evidence.
 
-**`npm run test:queue` on Jenkins 2.580.1:** the harness in this repository was written for 2.541.2.
-Jenkins 2.580.1 refuses CLI connections until the Jenkins URL is configured, so the throwaway
-instance must get a `jenkins.model.JenkinsLocationConfiguration.xml` (`http://localhost:8080/`)
-before it starts. With that local, unmerged adjustment the harness passed on the 2.580.1 image on
-2026-10-12 (0 failed steps, 0 overlapping builds); without it, it cannot drive a 2.580.1 instance.
+**`npm run test:queue` on Jenkins 2.580.1:** Jenkins 2.580.1 refuses CLI connections until the
+Jenkins URL is configured (`X-CLI-Error: Jenkins URL is not configured`, reproduced on 2026-10-14
+with the harness of 2.541.2: linter check and plugin deployment failed). The harness now writes
+`jenkins.model.JenkinsLocationConfiguration.xml` (`http://localhost:8080/`) into the throwaway
+instance before its first start (`scripts/ci/tests/queue-harness.test.ts` checks this, that the
+throwaway has no network and a memory cap, and that the real controller is only read). **Plugin
+source:** the harness copies the plugins of `SOURCE_CONTAINER` (default: the real `jenkins`), which
+since the upgrade already contains `parabank-serial-queue`, so its negative control ("without the
+dispatcher, builds run together") cannot pass from that source. Use a source holding only the
+image's plugins:
+
+```sh
+docker run -d --name qit-plugin-source --network none --entrypoint sh jenkins-jenkins:latest   -c 'mkdir -p /var/jenkins_home/plugins && cp -r /usr/share/jenkins/ref/plugins/. /var/jenkins_home/plugins/ && sleep 7200'
+SOURCE_CONTAINER=qit-plugin-source npm run test:queue
+docker rm -f qit-plugin-source
+```
+
+Run of 2026-10-14 on the live controller's image (`jenkins-jenkins`, Jenkins 2.580.1) with that
+plugin source and the default depth (2 restarts, 3 crashes): 105 checks ok, 0 failed; the
+Declarative linter accepts this `Jenkinsfile`; 38 builds judged, 0 overlapping RUNNING pairs. The
+throwaway container removed itself; the real Jenkins, QA and UAT were not touched.
 
 **Isolated throwaway Jenkins** (same image and plugin set, no network): the official Declarative
 linter validates this `Jenkinsfile`; earlier runs there proved the sandboxed flag lookup, UNSTABLE →
