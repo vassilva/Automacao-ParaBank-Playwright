@@ -5,6 +5,9 @@ evidence. **Limitation:** the original plan included screenshots that were not a
 was reconciled; it was reconciled against the written plan, this repository, its PR history and the
 Jenkins records, and no requirement was inferred from the screenshots.
 
+The requirement-by-requirement matrix (sources, implementation, tests, evidence) is
+[requirements-traceability.md](requirements-traceability.md).
+
 Statuses: COMPLETED (integrated in `main` and verified), READY FOR MERGE (open PR, checks green),
 OWNER APPROVAL REQUIRED (prepared and tested in isolation, changes live state), BLOCKED (waits for
 an external event), DEFERRED (not justified now, with the reason).
