@@ -1,0 +1,6 @@
+  <authorizationStrategy class="hudson.security.GlobalMatrixAuthorizationStrategy">
+    <permission>USER:hudson.model.Hudson.Administer:viamerico</permission>
+    <permission>USER:hudson.model.Hudson.Read:admin</permission>
+    <permission>GROUP:hudson.model.Hudson.Read:authenticated</permission>
+    <permission>GROUP:hudson.model.Item.Read:authenticated</permission>
+  </authorizationStrategy>
