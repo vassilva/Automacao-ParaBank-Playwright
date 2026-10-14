@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
-import { simulate } from './pipeline-model';
+import { simulate, uatDeployRequired } from './pipeline-model';
 
 const src = readFileSync('Jenkinsfile', 'utf8');
 const before = (ran: string[], a: string, b: string) => {
@@ -131,6 +131,27 @@ describe('main (post-merge): Regression once, then MANUAL UAT approval, then pro
     assert.equal(r.result, 'SUCCESS');
     assert.ok(!r.ran.includes('Deploy UAT'));
     before(r.ran, 'UAT Promotion', 'UAT Ready');
+    before(r.ran, 'UAT Ready', 'UAT Smoke');
+  });
+
+  it('decides a UAT deployment from the image UAT runs and its health (the Jenkinsfile decision)', () => {
+    // Skipped only when UAT runs the validated image AND is healthy; every other state deploys.
+    assert.equal(uatDeployRequired('sha256:validated', 'healthy'), 'false');
+    assert.equal(uatDeployRequired('sha256:validated', 'unhealthy'), 'true');
+    assert.equal(uatDeployRequired('sha256:validated', 'starting'), 'true');
+    assert.equal(uatDeployRequired('sha256:other', 'healthy'), 'true');
+    assert.equal(uatDeployRequired('', ''), 'true');
+  });
+
+  it('redeploys the validated image when UAT runs it but is unhealthy, then verifies it', () => {
+    const r = simulate('main', null, {
+      appImage: 'REUSE',
+      uatRunsValidatedImage: true,
+      uatHealth: 'unhealthy',
+    });
+    assert.equal(r.result, 'SUCCESS');
+    before(r.ran, 'UAT Approval', 'Deploy UAT');
+    before(r.ran, 'Deploy UAT', 'UAT Ready');
     before(r.ran, 'UAT Ready', 'UAT Smoke');
   });
 

@@ -620,8 +620,14 @@ accepted by the 2.580.1 Declarative linter. Real `main` build with a human appro
 (2026-10-13, merge of #16, `3bd9042`): Quality Gates (CI tests 115/115), QA Regression 24/24, UAT
 Approval requested and approved by the authorized operator, UAT Promotion verified (deployment not
 required: UAT already ran the validated image `sha256:ce686b92…`, same as QA), UAT Smoke 4/4,
-Validation Complete, SUCCESS. Not yet exercised for real: an approved build that redeploys UAT
-(the next `main` build bringing a new application image).
+Validation Complete, SUCCESS. The redeployment path itself (`environment.ts deploy uat`, then
+UAT Ready's identity check) ran for real in `main` #1, #3, #4 and #5 (four different images,
+#3 and #4 after an approval of the 2026-10-10 design, #5 with the current promotion decision);
+the current Jenkinsfile changed only the condition that starts it (`UAT_APPROVED`), which the
+pipeline model covers, including the decision itself as the Jenkinsfile writes it (UAT runs the
+validated image and is healthy → no deployment; unhealthy, other image or absent → deployment).
+Still pending: a real approved build of the current Jenkinsfile that redeploys UAT (the next `main`
+build bringing a new application image; no artificial change is made to force one).
 
 **Real Jenkins and GitHub (2026-10-10), previous designs of this pipeline:**
 
