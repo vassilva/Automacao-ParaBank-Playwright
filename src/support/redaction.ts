@@ -11,6 +11,19 @@
  */
 const MASK = '[REDACTED]';
 
+/**
+ * Shapes of the sensitive values this suite generates, wherever they appear: the synthetic SSN
+ * range (000-xx-xxxx) and the credentials of src/factories/customer.factory.ts (password "Pw" + 16
+ * base64url characters, or a few more for a deliberately wrong one; username "qa" + lowercase
+ * letters and digits). Masked by redact() as a safety net for a value that was somehow not
+ * registered, and looked for in archived evidence by scripts/ci/evidence-scan.ts.
+ */
+export const SECRET_SHAPES: Readonly<Record<'ssn' | 'password' | 'username', RegExp>> = {
+  ssn: /\b000-\d{2}-\d{4}\b/g,
+  password: /(?<![\w-])Pw[\w-]{16,24}(?![\w-])/g,
+  username: /(?<![\w-])qa[0-9a-z]{10,30}(?![\w-])/g,
+};
+
 const PATTERNS: [RegExp, string][] = [
   // Header lines in Playwright call logs and HTTP dumps.
   [/\b(cookie|set-cookie|authorization|proxy-authorization)(\s*[:=]\s*)[^\n\r]*/gi, `$1$2${MASK}`],
@@ -30,13 +43,10 @@ const PATTERNS: [RegExp, string][] = [
     `$1$2$3${MASK}`,
   ],
   [/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/g, `$1 ${MASK}`],
-  // The synthetic SSN range used by this suite (000-xx-xxxx), wherever it appears.
-  [/\b000-\d{2}-\d{4}\b/g, MASK],
-  // Shapes of the credentials src/factories/customer.factory.ts generates (password "Pw" + 16
-  // base64url characters, or a few more for a deliberately wrong one; username "qa" + lowercase
-  // letters and digits), as a safety net for a value that was somehow not registered below.
-  [/(?<![\w-])Pw[\w-]{16,24}(?![\w-])/g, MASK],
-  [/(?<![\w-])qa[0-9a-z]{10,30}(?![\w-])/g, MASK],
+  // The generated values' shapes (SECRET_SHAPES), wherever they appear.
+  [SECRET_SHAPES.ssn, MASK],
+  [SECRET_SHAPES.password, MASK],
+  [SECRET_SHAPES.username, MASK],
 ];
 
 /**
