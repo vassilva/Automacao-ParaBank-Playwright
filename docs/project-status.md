@@ -11,6 +11,12 @@ closure needs.
 Approval by the owner, UAT verified without redeployment because it already ran the validated
 image, UAT Smoke 4/4, evidence scan OK). Merged feature branches are deleted automatically.
 
+2026-10-15 (REQ-11, owner's updated workflow): pull requests are opened and auto-merged by
+`.github/workflows/auto-pr.yml` only through the required Jenkins checks (PRs #29 to #32);
+`main` #24 to #26 SUCCESS (Regression 24/24 once, UAT Approval by `viamerico`, UAT Smoke 4/4).
+Branches merged by the automation are deleted by its sweep (run 38797516746, unattended), those
+merged by people by `delete_branch_on_merge`.
+
 Applied the same day with the owner's explicit approval ([security-hardening.md](security-hardening.md)):
 Jenkins matrix authorization (REQ-21), encrypted backups with an owner-held key and removal of the
 plaintext copies and rollback volumes (REQ-22), removal of the privileged leftover container

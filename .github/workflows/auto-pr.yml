@@ -25,11 +25,12 @@ name: Auto PR and auto-merge
 #
 # Merges made through auto-merge enabled by GITHUB_TOKEN do not start workflows and do not trigger
 # GitHub's "automatically delete head branches" (observed on PR #29), so the sweep deletes those
-# branches itself. It starts when the Jenkins GitHub App (4991392) creates a check run: an App
-# event starts workflows, and Jenkins queues a main build right after every merge. The schedule is
-# only a fallback: it never fired after auto-pr.yml reached main through GITHUB_TOKEN merges only
-# (#29, #30; no scheduled run 18:43-19:15Z on 2026-10-15). Check runs created by GitHub Actions
-# start no workflow, so the sweep cannot trigger itself.
+# branches itself. It starts on the check runs of the Jenkins GitHub App (4991392) on PR heads:
+# when one succeeds it waits for the auto-merge and deletes that PR's branch at once. GitHub starts
+# no workflow for a check run whose head SHA is associated with GitHub Actions (docs, check_run
+# event), i.e. Jenkins' checks on main's merge commits made by this automation, and none for
+# GITHUB_TOKEN events; the schedule never fired either (2026-10-15), so it is only a fallback.
+# Check runs created by GitHub Actions start no workflow, so the sweep cannot trigger itself.
 on:
   push:
     branches-ignore:
@@ -39,7 +40,7 @@ on:
     types: [reopened, ready_for_review]
     branches: [main]
   check_run:
-    types: [created]
+    types: [created, completed]
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
@@ -49,7 +50,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: auto-pr-${{ github.event.pull_request.head.ref || (github.event_name == 'push' && github.ref_name) || 'sweep' }}
+  group: auto-pr-${{ github.event.pull_request.head.ref || (github.event_name == 'push' && github.ref_name) || github.event.check_run.head_sha || 'sweep' }}
   cancel-in-progress: false
 
 env:
@@ -122,8 +123,26 @@ jobs:
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'check_run' && github.event.check_run.app.id == 4991392)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
+      # A successful Jenkins check on a PR head is what lets auto-merge merge it moments later; this
+      # run waits for that merge so the PR's own branch is deleted right after it. (The check runs
+      # Jenkins creates on main's merge commits start no workflow: that commit is associated with
+      # GitHub Actions, see the header.)
+      - name: Wait for the merge of this check's PR
+        if: github.event_name == 'check_run' && github.event.action == 'completed' && github.event.check_run.conclusion == 'success'
+        env:
+          PRS: ${{ join(github.event.check_run.pull_requests.*.number, ' ') }}
+        run: |
+          set -euo pipefail
+          for pr in $PRS; do
+            for _ in $(seq 1 45); do
+              read -r state auto <<<"$(gh pr view -R "$REPO" "$pr" --json state,autoMergeRequest --jq '"\(.state) \(.autoMergeRequest != null)"')"
+              if [ "$state" != "OPEN" ]; then echo "PR #$pr is $state."; break; fi
+              if [ "$auto" != "true" ]; then echo "PR #$pr has no auto-merge; not waiting."; break; fi
+              sleep 20
+            done
+          done
       - name: Update branches
         run: |
           set -euo pipefail
@@ -137,19 +156,28 @@ jobs:
       - name: Delete head branches of merged PRs
         run: |
           set -euo pipefail
-          # Only PRs merged by this automation (a person's merge triggers delete_branch_on_merge), and
-          # only a branch that still points at the merged commit and backs no open PR: new work
-          # pushed after the merge is never deleted.
-          gh pr list -R "$REPO" --base main --state merged --limit 30 --json number,headRefName,headRefOid,isCrossRepository,mergedBy --jq '.[] | select(.isCrossRepository == false and .headRefName != "main" and (.mergedBy.login // "" | test("github-actions"))) | "\(.number) \(.headRefOid) \(.headRefName)"' |
-          while read -r pr sha branch; do
-            current=$(gh api "repos/$REPO/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null) || continue
-            if [ "$current" != "$sha" ]; then
-              echo "$branch moved after PR #$pr was merged; kept."
-              continue
+          # Eligible only: PR merged (hence closed) into main by this automation (a person's merge
+          # triggers delete_branch_on_merge instead), branch not main and not protected, still at the
+          # merged commit (work pushed after the merge is kept) and backing no open PR.
+          gh pr list -R "$REPO" --base main --state merged --limit 30 \
+            --json number,headRefName,headRefOid,isCrossRepository,mergedBy \
+            --jq '.[] | select(.isCrossRepository == false) | "\(.number) \(.headRefOid) \(.headRefName) \(.mergedBy.login // "-")"' |
+          while read -r pr sha branch by; do
+            current=$(gh api "repos/$REPO/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null) || continue # already deleted
+            decision() { echo "PR #$pr $branch: $1"; }
+            case "$by" in *github-actions*) ;; *) decision "kept (merged by $by, not the automation)"; continue ;; esac
+            if [ "$branch" = "main" ] || [ "$(gh api "repos/$REPO/branches/$branch" --jq '.protected')" != "false" ]; then
+              decision "kept (main or protected)"; continue
             fi
+            if [ "$current" != "$sha" ]; then decision "kept (moved after the merge: ${current:0:7} != ${sha:0:7})"; continue; fi
             if [ -n "$(gh pr list -R "$REPO" --head "$branch" --state open --json number --jq '.[0].number // empty')" ]; then
-              echo "$branch backs an open PR; kept."
-              continue
+              decision "kept (backs an open PR)"; continue
             fi
-            gh api -X DELETE "repos/$REPO/git/refs/heads/$branch" --silent && echo "Deleted $branch (PR #$pr merged)"
+            if gh api -X DELETE "repos/$REPO/git/refs/heads/$branch" --silent 2>/dev/null; then
+              decision "DELETED (merged by $by at ${sha:0:7})"
+            elif ! gh api "repos/$REPO/git/ref/heads/$branch" --silent 2>/dev/null; then
+              decision "already deleted by a concurrent run"
+            else
+              echo "::warning::PR #$pr $branch: deletion failed"
+            fi
           done

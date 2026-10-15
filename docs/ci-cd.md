@@ -79,21 +79,26 @@ commit); every later push, or reopening a PR or marking it ready, enables it aga
 satisfied, so the required checks are exactly the same as before. There is **no file-based special
 review** and no label.
 
-| Situation                               | Result                                                                                                       |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Required checks pass, branch up to date | merged by GitHub; head branch deleted by the sweep (next Jenkins check)                                      |
-| A check fails, is missing or pending    | stays open, blocked (push a fix: Jenkins builds it again)                                                    |
-| Branch behind `main`                    | the sweep calls "update branch" (next Jenkins check, or run it manually); Jenkins validates the updated head |
-| Conflict with `main`                    | the update fails, the PR stays blocked for a person to resolve                                               |
-| Draft PR, `wip/**` branch, fork         | never auto-merged; convert to draft to hold a PR (every push re-enables auto-merge on a ready PR)            |
+| Situation                               | Result                                                                                                         |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Required checks pass, branch up to date | merged by GitHub; head branch deleted by the sweep right after the merge                                       |
+| A check fails, is missing or pending    | stays open, blocked (push a fix: Jenkins builds it again)                                                      |
+| Branch behind `main`                    | the sweep calls "update branch" (on Jenkins PR checks, or run it manually); Jenkins validates the updated head |
+| Conflict with `main`                    | the update fails, the PR stays blocked for a person to resolve                                                 |
+| Draft PR, `wip/**` branch, fork         | never auto-merged; convert to draft to hold a PR (every push re-enables auto-merge on a ready PR)              |
 
 Auto-merge enabled by the workflow token merges as `github-actions[bot]`; the merge commit's push
 still reaches Jenkins through the GitHub App webhook, so `main` builds once per merge. Such merges
-do not start GitHub workflows and do not trigger `delete_branch_on_merge` (GitHub behavior, observed
-on PR #29), which is why the sweep starts on every check run the Jenkins GitHub App creates (a `main` build is
-queued right after each merge; the 15-minute schedule is only a fallback, it never fired after
-the workflow reached `main` through automation merges): it updates PRs behind `main` and deletes the
-head branch of a merged PR when the branch still points at the merged commit and backs no open PR.
+do not trigger `delete_branch_on_merge` (observed on PR #29; reported for App tokens too, GitHub
+community discussion 63409), and GitHub starts no workflow for them: neither the push, nor the
+Jenkins check runs on the merge commit ("does not trigger workflows if the check suite's head SHA
+is associated with GitHub Actions", `check_run` event), nor, as observed on 2026-10-15, the
+schedule. The **sweep** therefore runs on the Jenkins check runs of **PR heads** (commits people
+push): when one succeeds, it waits (up to 15 min) for the auto-merge and then deletes that PR's
+branch; every sweep also updates PRs behind `main`. A branch is deleted only when its PR was merged
+into `main` by the automation, it is not `main` nor protected, it still points at the merged commit
+and it backs no open PR; every decision is logged (PR, branch, result, reason). Branches merged by
+people are left to `delete_branch_on_merge`.
 A PR that changes `.github/workflows/` is auto-merged like any other (PR #29 was, 2026-10-15).
 
 | Control                | Setting                                                                                                                                                                                                                                         |
