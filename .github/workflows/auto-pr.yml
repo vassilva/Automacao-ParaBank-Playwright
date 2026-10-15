@@ -10,11 +10,14 @@ name: Auto PR and auto-merge
 #   push to any branch except main and wip/**  -> open a PR to main (if none) and enable
 #                                                 auto-merge on it unless it is a draft (every push:
 #                                                 idempotent, so a failed enable heals on the next push)
-#   pull request opened/reopened/ready by a person -> enable auto-merge (drafts and forks: never)
+#   pull request reopened or marked ready        -> enable auto-merge (drafts and forks: never);
+#                                                 "opened" is covered by the push (a PR opened by
+#                                                 GITHUB_TOKEN would only leave a run awaiting approval)
 #
 # Races and recursion: one run at a time per branch (push and pull_request share the group);
 # GitHub allows one open PR per head and base, and a lost creation race reuses the winner's PR.
-# Events caused by GITHUB_TOKEN (the PR it opens, the merge, branch updates) start no workflow, so
+# Events caused by GITHUB_TOKEN (the merge, branch updates) start no workflow, and the PR it opens
+# matches no trigger here ("opened" is not one; it would wait for approval, seen on PR #30), so
 # nothing here triggers itself. Jenkins still receives them through its GitHub App webhook.
 #   every 15 minutes, or started manually      -> "update branch" on auto-merge PRs behind main,
 #                                                 so Jenkins validates them again against new main;
@@ -29,7 +32,7 @@ on:
       - main
       - 'wip/**'
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    types: [reopened, ready_for_review]
     branches: [main]
   schedule:
     - cron: '*/15 * * * *'

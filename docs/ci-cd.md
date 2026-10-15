@@ -75,7 +75,7 @@ Repository: https://github.com/vassilva/Automacao-ParaBank-Playwright (public, o
 account; `main` is the default branch). **Integration is automatic since 2026-10-15** (owner's
 decision): [`auto-pr.yml`](../.github/workflows/auto-pr.yml) opens a pull request to `main` for
 every pushed branch except `main` and `wip/**` and enables GitHub's native **auto-merge** (merge
-commit); it also enables it on PRs a person opens. GitHub merges only when ruleset `24842741` is
+commit); every later push, or reopening a PR or marking it ready, enables it again. GitHub merges only when ruleset `24842741` is
 satisfied, so the required checks are exactly the same as before. There is **no file-based special
 review** and no label.
 
