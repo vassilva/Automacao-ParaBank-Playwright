@@ -1,10 +1,10 @@
 // Jenkins CI/CD for the ParaBank BDD project (Playwright + TypeScript + Cucumber).
 // One Jenkinsfile, one Multibranch Pipeline. The definitive flow (docs/ci-cd.md):
 //
-//   local development -> push to a feature branch -> Pull Request -> Quality Gates -> QA Smoke (4)
-//   -> MANUAL merge in GitHub (no auto-merge) -> main: QA Regression (24) -> MANUAL UAT approval
-//   in Jenkins (authorized operator only) -> UAT promotion of the validated image -> UAT Smoke (4)
-//   -> SUCCESS
+//   local development -> push to a feature branch -> automatic Pull Request -> Quality Gates
+//   -> QA Smoke (4) -> GitHub AUTO-MERGE (required checks only) -> main: QA Regression (24)
+//   -> MANUAL UAT approval in Jenkins (authorized operator only) -> UAT promotion of the
+//   validated image -> UAT Smoke (4) -> SUCCESS
 //
 //   PUSH (branch, by prefix; a branch with an open PR is built as the PR only; only main and PR-<n>
 //   are built automatically, every other branch only when started manually, docs/ci-cd.md):
@@ -195,7 +195,7 @@ pipeline {
             'DEVELOPER'   : 'QA: Smoke (no Regression, no UAT)',
             'QA'          : 'QA: Impacted Tests vs main (no UAT)',
             'CONFIGURATOR': 'Quality Gates + Config Check (no image, no deployment)',
-            'CI'          : 'QA: Smoke (+ feature-level impacted tests); no Regression, no UAT -> required checks; manual merge',
+            'CI'          : 'QA: Smoke (+ feature-level impacted tests); no Regression, no UAT -> required checks; auto-merge',
             'CD'          : 'QA: Regression (24, once) -> manual UAT approval -> UAT promotion of the validated image -> UAT: Smoke (4)',
           ][env.PIPELINE_ROLE]
           banner('PARABANK PIPELINE', [

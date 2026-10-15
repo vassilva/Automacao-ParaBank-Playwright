@@ -1,0 +1,105 @@
+name: Auto PR and auto-merge
+
+# Integration automation (docs/ci-cd.md). It never merges anything itself and never bypasses a
+# rule: it opens the pull request and turns on GitHub's native auto-merge, and GitHub merges only
+# when ruleset 24842741 is satisfied (required checks "Jenkins" and
+# "continuous-integration/jenkins/pr-head" passed on a branch that is up to date with main; the
+# Jenkins PR build is Quality Gates + QA Smoke 4/4). A failed or missing check, or a conflict,
+# leaves the pull request open and blocked. UAT approval stays a manual Jenkins input.
+#
+#   push to any branch except main and wip/**  -> open a PR to main (if none) + enable auto-merge
+#   pull request opened/reopened/ready by a person -> enable auto-merge (drafts and forks: never)
+#   every 15 minutes, or started manually      -> "update branch" on auto-merge PRs behind main,
+#                                                 so Jenkins validates them again against new main
+#
+# Merges made through auto-merge enabled by GITHUB_TOKEN do not start workflows (GitHub rule), so
+# the update sweep also runs on a schedule. GITHUB_TOKEN cannot change workflow files: a PR that
+# touches .github/workflows/ cannot be merged or updated by this automation; a person does it.
+on:
+  push:
+    branches-ignore:
+      - main
+      - 'wip/**'
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+    branches: [main]
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-pr-${{ github.event_name == 'push' && github.ref || github.event.pull_request.number || 'sweep' }}
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  REPO: ${{ github.repository }}
+
+jobs:
+  open-pr:
+    name: Open PR and enable auto-merge
+    if: github.event_name == 'push' && !github.event.deleted
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open the pull request
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          existing=$(gh pr list -R "$REPO" --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "PR #$existing already open for $BRANCH; auto-merge is left as it is."
+            exit 0
+          fi
+          ahead=$(gh api "repos/$REPO/compare/main...$BRANCH" --jq '.ahead_by')
+          if [ "$ahead" = "0" ]; then
+            echo "$BRANCH has no commits ahead of main; no PR."
+            exit 0
+          fi
+          title=$(gh api "repos/$REPO/compare/main...$BRANCH" --jq '.commits[0].commit.message | split("\n")[0]')
+          {
+            echo "Opened automatically for \`$BRANCH\` (docs/ci-cd.md). Auto-merge is enabled: GitHub merges"
+            echo "only after the required Jenkins checks (Quality Gates + QA Smoke 4/4) pass on an up-to-date"
+            echo "branch. Convert to draft or disable auto-merge to hold it."
+            echo
+            echo "Commits:"
+            gh api "repos/$REPO/compare/main...$BRANCH" --jq '.commits[] | "- " + (.commit.message | split("\n")[0])'
+          } > body.md
+          url=$(gh pr create -R "$REPO" --base main --head "$BRANCH" --title "$title" --body-file body.md)
+          echo "Opened $url"
+          gh pr merge -R "$REPO" "$url" --auto --merge
+          echo "Auto-merge enabled for $url"
+
+  enable-auto-merge:
+    name: Enable auto-merge
+    if: >-
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !startsWith(github.event.pull_request.head.ref, 'wip/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: gh pr merge -R "$REPO" "${{ github.event.pull_request.number }}" --auto --merge
+
+  update-behind:
+    name: Update auto-merge PRs behind main
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Update branches
+        run: |
+          set -euo pipefail
+          gh pr list -R "$REPO" --base main --state open \
+            --json number,isDraft,mergeStateStatus,autoMergeRequest,isCrossRepository \
+            --jq '.[] | select(.autoMergeRequest != null and .isDraft == false and .isCrossRepository == false and .mergeStateStatus == "BEHIND") | .number' |
+          while read -r pr; do
+            # Fails (and is reported) on a conflict: the PR stays blocked for a person to resolve.
+            gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" --silent && echo "PR #$pr updated with main" || echo "::warning::PR #$pr could not be updated (conflict or workflow file change)"
+          done

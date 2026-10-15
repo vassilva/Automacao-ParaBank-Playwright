@@ -1,12 +1,14 @@
-# CI/CD: PR Smoke, manual merge, QA Regression, manual UAT approval, UAT Smoke
+# CI/CD: automatic PR, PR Smoke, auto-merge, QA Regression, manual UAT approval, UAT Smoke
 
 One `Jenkinsfile`, one **Multibranch Pipeline**, one pipeline at a time (held in the Jenkins queue,
 see "Scheduling"). The definitive flow:
 
 ```
-LOCAL DEVELOPMENT (tests written and run against QA) ─> PUSH TO A FEATURE BRANCH ─> PULL REQUEST
+LOCAL DEVELOPMENT (tests written and run against QA) ─> PUSH TO A FEATURE BRANCH
+  ─> PULL REQUEST, opened automatically                (any branch except main and wip/**)
   ─> QUALITY GATES ─> QA SMOKE (4)                     = the required checks (failures block)
-  ─> MANUAL MERGE in GitHub                           (no auto-merge, no automation merges)
+  ─> AUTO-MERGE by GitHub                              (only when every required check passed on
+                                                        an up-to-date branch; no bypass, no labels)
   ─> QA REGRESSION (24, once, on QA)                   = the gate before UAT
   ─> MANUAL UAT APPROVAL in Jenkins                    (authorized operator only; reject,
                                                         timeout or abort: nothing deployed)
@@ -70,29 +72,44 @@ Regression gate always runs.
 ## Merge policy and GitHub protection
 
 Repository: https://github.com/vassilva/Automacao-ParaBank-Playwright (public, owned by a user
-account; `main` is the default branch). **Every merge is manual**, by a person in the GitHub
-interface, once the required checks passed. Auto-merge is disabled for the repository and nothing
-merges automatically. There is **no file-based special review**: every PR is gated by the same
-required CI checks.
+account; `main` is the default branch). **Integration is automatic since 2026-10-15** (owner's
+decision): [`auto-pr.yml`](../.github/workflows/auto-pr.yml) opens a pull request to `main` for
+every pushed branch except `main` and `wip/**` and enables GitHub's native **auto-merge** (merge
+commit); it also enables it on PRs a person opens. GitHub merges only when ruleset `24842741` is
+satisfied, so the required checks are exactly the same as before. There is **no file-based special
+review** and no label.
+
+| Situation                               | Result                                                                                                    |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Required checks pass, branch up to date | merged by GitHub, head branch deleted (`delete_branch_on_merge`)                                          |
+| A check fails, is missing or pending    | stays open, blocked (push a fix: Jenkins builds it again)                                                 |
+| Branch behind `main`                    | the workflow calls "update branch" (every 15 min, or run it manually); Jenkins validates the updated head |
+| Conflict with `main`                    | the update fails, the PR stays blocked for a person to resolve                                            |
+| Draft PR, `wip/**` branch, fork         | never auto-merged (convert a draft to ready, or disable auto-merge on a PR, to hold or release it)        |
+| PR that changes `.github/workflows/`    | the workflow token cannot merge or update it (GitHub rule); a person merges it after the checks pass      |
+
+Auto-merge enabled by the workflow token merges as `github-actions[bot]`; the merge commit's push
+still reaches Jenkins through the GitHub App webhook, so `main` builds once per merge. Such merges
+do not start GitHub workflows (GitHub rule), which is why the branch update runs on a schedule.
 
 | Control                | Setting                                                                                                                                                                                                                                         |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auto-merge             | **disabled** for the repository (`allow_auto_merge: false`)                                                                                                                                                                                     |
+| Auto-merge             | **enabled** for the repository (`allow_auto_merge: true`, 2026-10-15); turned on per PR by `auto-pr.yml`                                                                                                                                        |
 | Ruleset `24842741`     | [`github-ruleset-main.json`](github-ruleset-main.json): PR required; no deletion; no force-push; required `Jenkins` and `continuous-integration/jenkins/pr-head` (Jenkins GitHub App 4991392) on a branch **up to date** with `main`; no bypass |
 | Ruleset `24856083`     | [`github-ruleset-main-owner-merge.json`](github-ruleset-main-owner-merge.json): "restrict updates", **disabled since 2026-10-11** (its `update` rule makes every PR merge a bypass-only action). Kept for the record; do not re-enable          |
 | Collaborators          | the owner only (`vassilva`, admin)                                                                                                                                                                                                              |
-| Workflow token default | read-only; workflows cannot approve PRs                                                                                                                                                                                                         |
+| Workflow token default | read-only; `auto-pr.yml` declares `contents: write` + `pull-requests: write`; Actions may create PRs (the same setting allows approving them; 0 approvals are required, so it adds nothing to merging)                                          |
 
 A failed, missing or pending required check blocks the merge; nobody can bypass ruleset
-`24842741`. **Automation cannot merge:** Jenkins only publishes checks and statuses (it is not a
-bypass actor), `playwright.yml` is manual and read-only, and auto-merge is disabled. Who can merge
-follows from repository access (today only the owner). The required signals come from Jenkins only,
+`24842741`, neither a person nor the automation: Jenkins only publishes checks and statuses (it is
+not a bypass actor), and auto-merge only waits for the ruleset to be satisfied. The required signals come from Jenkins only,
 so GitHub and Jenkins have no circular dependency: Jenkins never waits for a GitHub status.
 
 **History:** from 2026-10-10 to 2026-10-13 a required `gate-review` status (GitHub Actions) added a
 human review for "gate-defining" files. It was removed on 2026-10-13 by the owner's decision: every
-PR is gated by the CI checks, the merge is always a manual human act, and the human control before
-UAT is the Jenkins approval (see "Manual UAT approval").
+PR is gated by the CI checks and the human control before UAT is the Jenkins approval (see "Manual
+UAT approval"). From 2026-10-13 to 2026-10-15 every merge was manual; since 2026-10-15 PRs are
+opened and merged automatically (above).
 
 ### Required signals and what GitHub counts as passing
 
@@ -101,7 +118,7 @@ builds:
 
 | Jenkins result | `Jenkins` check run                         | `pr-head` commit status | Merge                                                  |
 | -------------- | ------------------------------------------- | ----------------------- | ------------------------------------------------------ |
-| SUCCESS        | success                                     | success                 | allowed (manual merge)                                 |
+| SUCCESS        | success                                     | success                 | allowed (auto-merge merges)                            |
 | UNSTABLE       | neutral (if configured) or failure          | failure                 | blocked (PR UNSTABLE is turned into FAILURE anyway)    |
 | FAILURE        | failure                                     | error                   | blocked                                                |
 | NOT_BUILT      | skipped                                     | error                   | blocked by the status (the pipeline never produces it) |
@@ -427,9 +444,10 @@ new rule, and until then its files select Regression. Renames list both the old 
 (`--no-renames`), so moving shared code into a domain file still selects Regression.
 
 Jenkins validates a PR with **the PR's own Jenkinsfile and scripts**, so a PR that changes the
-pipeline or its scripts can change the checks that judge it. The human control for that is the
-manual merge (read the diff before merging); after the merge, `main` is validated with its own
-Jenkinsfile and nothing reaches UAT without the manual Jenkins approval.
+pipeline or its scripts can change the checks that judge it. With auto-merge (since 2026-10-15)
+no person reads the diff before the merge: the remaining human control is the manual Jenkins UAT
+approval (`main` is validated with its own, merged Jenkinsfile, and nothing reaches UAT without
+it). Open such a PR as a draft, or push it to `wip/**`, when it needs a reading first.
 
 ## Suite counts and the coverage validator
 

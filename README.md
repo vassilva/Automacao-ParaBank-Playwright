@@ -364,7 +364,7 @@ itself changed, and UAT only ever receives the image QA Regression validated:
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Push         | By branch prefix: `feature/*` QA Smoke (4); `qa/*` QA Impacted Tests; `config/*` Quality Gates + Config Check only (no deployment)                                             |
 | Pull request | Quality gates → config check → application image → QA Smoke (4) → feature-level impacted tests → completeness check = the required checks; no Regression, no UAT               |
-| Merge        | **Manual** in GitHub, only after every required check passed (auto-merge disabled; a failed, missing or pending check blocks it)                                               |
+| Merge        | **Automatic**: PR opened by `auto-pr.yml`, GitHub auto-merge only after every required check passed on an up-to-date branch (a failed, missing or pending check blocks it)     |
 | `main`       | Quality gates → application image → QA Regression (24, once) → **manual UAT approval** in Jenkins (authorized operator) → UAT promotion of the validated image → UAT Smoke (4) |
 
 Quality gates on every push and PR: lint, format, typecheck, strict dry run, test-data audit, the
