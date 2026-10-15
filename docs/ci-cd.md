@@ -85,7 +85,7 @@ review** and no label.
 | A check fails, is missing or pending    | stays open, blocked (push a fix: Jenkins builds it again)                                                 |
 | Branch behind `main`                    | the workflow calls "update branch" (every 15 min, or run it manually); Jenkins validates the updated head |
 | Conflict with `main`                    | the update fails, the PR stays blocked for a person to resolve                                            |
-| Draft PR, `wip/**` branch, fork         | never auto-merged (convert a draft to ready, or disable auto-merge on a PR, to hold or release it)        |
+| Draft PR, `wip/**` branch, fork         | never auto-merged; convert to draft to hold a PR (every push re-enables auto-merge on a ready PR)         |
 | PR that changes `.github/workflows/`    | the workflow token cannot merge or update it (GitHub rule); a person merges it after the checks pass      |
 
 Auto-merge enabled by the workflow token merges as `github-actions[bot]`; the merge commit's push
