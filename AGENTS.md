@@ -31,7 +31,10 @@ Task prompts: [docs/ai/prompt-library.md](docs/ai/prompt-library.md). Review sta
    manual only**: never add it to an automatic pipeline path.
 6. **No infrastructure changes from test work.** Do not modify `Jenkinsfile`, `compose.yaml`,
    `docker/`, `jenkins/`, `.github/` or Jenkins/Docker state to make tests pass; such changes need
-   explicit approval. Never merge a PR or answer the Jenkins UAT approval: both are human acts.
+   explicit approval. Never merge a PR by hand or answer the Jenkins UAT approval. PRs are opened
+   and auto-merged by `.github/workflows/auto-pr.yml` only through the required checks
+   ([docs/ci-cd.md](docs/ci-cd.md)); never bypass, weaken or work around them. UAT approval is
+   always a human act.
    Never run `npm run uat:deploy` (or `env -- deploy uat`): it skips that approval and is the
    owner's rollback tool only ([docs/security-hardening.md](docs/security-hardening.md)).
 7. **No sensitive data in evidence** (logs, reports, screenshots, traces, docs, commit messages,
