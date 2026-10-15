@@ -75,22 +75,24 @@ Repository: https://github.com/vassilva/Automacao-ParaBank-Playwright (public, o
 account; `main` is the default branch). **Integration is automatic since 2026-10-15** (owner's
 decision): [`auto-pr.yml`](../.github/workflows/auto-pr.yml) opens a pull request to `main` for
 every pushed branch except `main` and `wip/**` and enables GitHub's native **auto-merge** (merge
-commit); it also enables it on PRs a person opens. GitHub merges only when ruleset `24842741` is
+commit); every later push, or reopening a PR or marking it ready, enables it again. GitHub merges only when ruleset `24842741` is
 satisfied, so the required checks are exactly the same as before. There is **no file-based special
 review** and no label.
 
 | Situation                               | Result                                                                                                    |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Required checks pass, branch up to date | merged by GitHub, head branch deleted (`delete_branch_on_merge`)                                          |
+| Required checks pass, branch up to date | merged by GitHub; head branch deleted by the sweep (within 15 min)                                        |
 | A check fails, is missing or pending    | stays open, blocked (push a fix: Jenkins builds it again)                                                 |
 | Branch behind `main`                    | the workflow calls "update branch" (every 15 min, or run it manually); Jenkins validates the updated head |
 | Conflict with `main`                    | the update fails, the PR stays blocked for a person to resolve                                            |
 | Draft PR, `wip/**` branch, fork         | never auto-merged; convert to draft to hold a PR (every push re-enables auto-merge on a ready PR)         |
-| PR that changes `.github/workflows/`    | the workflow token cannot merge or update it (GitHub rule); a person merges it after the checks pass      |
 
 Auto-merge enabled by the workflow token merges as `github-actions[bot]`; the merge commit's push
 still reaches Jenkins through the GitHub App webhook, so `main` builds once per merge. Such merges
-do not start GitHub workflows (GitHub rule), which is why the branch update runs on a schedule.
+do not start GitHub workflows and do not trigger `delete_branch_on_merge` (GitHub behavior, observed
+on PR #29), which is why the sweep runs on a schedule: it updates PRs behind `main` and deletes the
+head branch of a merged PR when the branch still points at the merged commit and backs no open PR.
+A PR that changes `.github/workflows/` is auto-merged like any other (PR #29 was, 2026-10-15).
 
 | Control                | Setting                                                                                                                                                                                                                                         |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
