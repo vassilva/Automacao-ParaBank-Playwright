@@ -13,8 +13,8 @@ name: Auto PR and auto-merge
 #   pull request reopened or marked ready        -> enable auto-merge (drafts and forks: never);
 #                                                 "opened" is covered by the push (a PR opened by
 #                                                 GITHUB_TOKEN would only leave a run awaiting approval)
-#   every 15 minutes, or started manually      -> "update branch" on auto-merge PRs behind main,
-#                                                 so Jenkins validates them again against new main;
+#   Jenkins App creates a check run (fallback:  -> "update branch" on auto-merge PRs behind main,
+#   every 15 min), or started manually            so Jenkins validates them again against new main;
 #                                                 delete the head branch of merged PRs
 #
 # Races and recursion: one run at a time per branch (push and pull_request share the group);
@@ -24,8 +24,12 @@ name: Auto PR and auto-merge
 # nothing here triggers itself. Jenkins still receives them through its GitHub App webhook.
 #
 # Merges made through auto-merge enabled by GITHUB_TOKEN do not start workflows and do not trigger
-# GitHub's "automatically delete head branches" (observed on PR #29), so the sweep runs on a
-# schedule and deletes those branches itself.
+# GitHub's "automatically delete head branches" (observed on PR #29), so the sweep deletes those
+# branches itself. It starts when the Jenkins GitHub App (4991392) creates a check run: an App
+# event starts workflows, and Jenkins queues a main build right after every merge. The schedule is
+# only a fallback: it never fired after auto-pr.yml reached main through GITHUB_TOKEN merges only
+# (#29, #30; no scheduled run 18:43-19:15Z on 2026-10-15). Check runs created by GitHub Actions
+# start no workflow, so the sweep cannot trigger itself.
 on:
   push:
     branches-ignore:
@@ -34,6 +38,8 @@ on:
   pull_request:
     types: [reopened, ready_for_review]
     branches: [main]
+  check_run:
+    types: [created]
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
@@ -112,7 +118,9 @@ jobs:
 
   sweep:
     name: Update PRs behind main and delete merged branches
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'check_run' && github.event.check_run.app.id == 4991392)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
