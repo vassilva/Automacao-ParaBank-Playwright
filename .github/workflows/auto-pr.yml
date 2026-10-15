@@ -17,10 +17,12 @@ name: Auto PR and auto-merge
 # Events caused by GITHUB_TOKEN (the PR it opens, the merge, branch updates) start no workflow, so
 # nothing here triggers itself. Jenkins still receives them through its GitHub App webhook.
 #   every 15 minutes, or started manually      -> "update branch" on auto-merge PRs behind main,
-#                                                 so Jenkins validates them again against new main
+#                                                 so Jenkins validates them again against new main;
+#                                                 delete the head branch of merged PRs
 #
-# Merges made through auto-merge enabled by GITHUB_TOKEN do not start workflows (GitHub rule), so
-# the update sweep runs on a schedule.
+# Merges made through auto-merge enabled by GITHUB_TOKEN do not start workflows and do not trigger
+# GitHub's "automatically delete head branches" (observed on PR #29), so the sweep runs on a
+# schedule and deletes those branches itself.
 on:
   push:
     branches-ignore:
@@ -105,8 +107,8 @@ jobs:
     steps:
       - run: gh pr merge -R "$REPO" "${{ github.event.pull_request.number }}" --auto --merge
 
-  update-behind:
-    name: Update auto-merge PRs behind main
+  sweep:
+    name: Update PRs behind main and delete merged branches
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -119,5 +121,24 @@ jobs:
             --jq '.[] | select(.autoMergeRequest != null and .isDraft == false and .isCrossRepository == false and .mergeStateStatus == "BEHIND") | .number' |
           while read -r pr; do
             # Fails (and is reported) on a conflict: the PR stays blocked for a person to resolve.
-            gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" --silent && echo "PR #$pr updated with main" || echo "::warning::PR #$pr could not be updated (conflict or workflow file change)"
+            gh api -X PUT "repos/$REPO/pulls/$pr/update-branch" --silent && echo "PR #$pr updated with main" || echo "::warning::PR #$pr could not be updated (conflict)"
+          done
+      - name: Delete head branches of merged PRs
+        run: |
+          set -euo pipefail
+          # Only PRs merged by this automation (a person's merge triggers delete_branch_on_merge), and
+          # only a branch that still points at the merged commit and backs no open PR: new work
+          # pushed after the merge is never deleted.
+          gh pr list -R "$REPO" --base main --state merged --limit 30 --json number,headRefName,headRefOid,isCrossRepository,mergedBy --jq '.[] | select(.isCrossRepository == false and .headRefName != "main" and (.mergedBy.login // "" | test("github-actions"))) | "\(.number) \(.headRefOid) \(.headRefName)"' |
+          while read -r pr sha branch; do
+            current=$(gh api "repos/$REPO/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null) || continue
+            if [ "$current" != "$sha" ]; then
+              echo "$branch moved after PR #$pr was merged; kept."
+              continue
+            fi
+            if [ -n "$(gh pr list -R "$REPO" --head "$branch" --state open --json number --jq '.[0].number // empty')" ]; then
+              echo "$branch backs an open PR; kept."
+              continue
+            fi
+            gh api -X DELETE "repos/$REPO/git/refs/heads/$branch" --silent && echo "Deleted $branch (PR #$pr merged)"
           done
