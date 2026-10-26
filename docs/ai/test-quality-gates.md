@@ -39,4 +39,6 @@ message, run the single scenario (`npm test -- features/<file>.feature:<line>`),
 - **Rework:** any criterion fails, or a test passed without having been seen to fail.
 - **Human review is mandatory** for significant AI-generated changes: new or changed `Then`
   steps, suite tags, known-defect scenarios or proofs, Page Object actions, and anything in the
-  pipeline, CI scripts, workflows or redaction controls. The merge itself is always manual.
+  pipeline, CI scripts, workflows or redaction controls. That review happens before the change is
+  pushed: the PR is then opened and auto-merged by `auto-pr.yml` once the required checks pass,
+  with no person reading the diff ([docs/ci-cd.md](../ci-cd.md)). UAT approval stays a human act.
