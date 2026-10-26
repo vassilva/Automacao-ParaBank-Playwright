@@ -12,6 +12,14 @@ Task prompts: [docs/ai/prompt-library.md](docs/ai/prompt-library.md). Review sta
 [docs/ai/test-quality-gates.md](docs/ai/test-quality-gates.md). Failures:
 [docs/failure-triage.md](docs/failure-triage.md).
 
+Agent tooling (same content for Claude Code and Codex): skills in `.claude/skills/` and
+`.agents/skills/` (identical copies), subagents in `.claude/agents/*.md` and `.codex/agents/*.toml`,
+MCP servers in `.mcp.json` and `.codex/config.toml`. One guard and one format/lint hook in
+`.agents/hooks/` serve both (`.claude/settings.json`, `.codex/hooks.json`); the guard enforces
+rules 6 and 8 and is tested by `scripts/ci/tests/agent-guard.test.ts`. Codex resolves the hook
+command from the session directory, so start Codex at the repository root and trust the project
+hooks.
+
 ## Non-negotiable rules
 
 1. **Cucumber is the only test definition.** Every test is a Gherkin scenario in `features/`.

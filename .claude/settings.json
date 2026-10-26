@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.mjs\"",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.agents/hooks/guard.mjs\"",
             "timeout": 10
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/format-lint.mjs\"",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.agents/hooks/format-lint.mjs\"",
             "timeout": 120
           }
         ]
