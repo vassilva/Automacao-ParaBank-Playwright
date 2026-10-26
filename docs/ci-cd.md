@@ -165,8 +165,8 @@ Isolated Jenkins (`npm run test:queue`): a push to a branch without PR builds no
 into `main` builds `main` once and not the branch; a newly discovered branch gets a job but no build;
 a new PR commit builds that PR once; a manual branch build still runs (serialized like any other).
 The rule matches by name, so it is the same for GitHub events (not reproducible offline).
-Deleting the head branch after a merge (GitHub "Automatically delete head branches") also removes
-the leftover branch job; optional.
+Deleting the head branch after a merge (GitHub "Automatically delete head branches", enabled; the
+sweep for automation merges) also removes the leftover branch job.
 
 ## Stages, in execution order
 
@@ -618,16 +618,19 @@ JavaScript, `…number:!0,password:!0`, not data.)
 
 ## Operations: what remains manual
 
-1. **Merging:** a person merges each PR in GitHub once its required checks passed. Never automatic.
+1. **Merging:** nothing manual since 2026-10-15. `auto-pr.yml` opens the PR and GitHub
+   auto-merges it only after every required check passed on an up-to-date branch (see "Merge
+   policy and GitHub protection"); nobody merges by hand or bypasses the checks.
 2. **UAT deployment:** an operator listed in `PARABANK_UAT_APPROVERS` approves each `main` build at
    its UAT Approval stage (or aborts it). Never automatic.
 3. **Jenkins administrator, once:** install the queue dispatcher (see "Installation and
    rollback") and set the branch property "Suppress automatic SCM triggering" (`main|PR-\d+`, see
    "Jenkins job and GitHub discovery"). Done: both verified on the real Jenkins on 2026-10-13
    (`parabank-serial-queue` 1.0.0 installed, property set).
-4. **Optional:** enable "Automatically delete head branches" in GitHub (removes leftover branch
-   jobs); delete the stale `feature/ci-jenkins-pipeline` branch; delete `main` #1 (unredacted
-   synthetic data, see "Artifacts archived before the log-redaction fix").
+4. **Optional:** delete the stale `feature/ci-jenkins-pipeline` branch. Done: "Automatically
+   delete head branches" is enabled (`delete_branch_on_merge: true`; automation merges are
+   cleaned up by the sweep), and `main` #1 (unredacted synthetic data, see "Artifacts archived
+   before the log-redaction fix") was discarded by build retention.
 5. **Security updates:** the advisories found on 2026-10-11 (Jenkins 2.541.2 core, Script
    Security, Pipeline: Multibranch, Pipeline: Groovy Libraries) are resolved: the controller runs
    Jenkins 2.580.1 on Java 21 since 2026-10-12, and on 2026-10-13 none of the update center's

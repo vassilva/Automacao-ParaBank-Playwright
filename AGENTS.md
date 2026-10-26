@@ -6,7 +6,8 @@ Copilot, Codex, Cursor, …) working in this repository. Tool-specific files onl
 over this summary if they ever disagree (then fix this file).
 
 Read first: [README.md](README.md) (architecture, commands), [docs/test-suites.md](docs/test-suites.md)
-(suite selection), [docs/defects.md](docs/defects.md) (known defects), [docs/test-data.md](docs/test-data.md).
+(suite selection), [docs/defects.md](docs/defects.md) (known defects), [docs/test-data.md](docs/test-data.md),
+[docs/CODEBASE_MAP.md](docs/CODEBASE_MAP.md) (file map, navigation by task).
 Task prompts: [docs/ai/prompt-library.md](docs/ai/prompt-library.md). Review standard:
 [docs/ai/test-quality-gates.md](docs/ai/test-quality-gates.md). Failures:
 [docs/failure-triage.md](docs/failure-triage.md).

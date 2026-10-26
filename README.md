@@ -372,8 +372,9 @@ CI/CD tests (`npm run test:ci`), the BDD structure check and the suite inventori
 is checked against its approved size. Known defects never gate a deployment (optional stage on
 `main`, at most UNSTABLE). Cucumber always runs with one worker and no retries.
 **Status:** serialized pipeline validated on the real Jenkins; the manual UAT approval (2026-10-13)
-is validated by the pipeline tests and on an isolated Jenkins 2.580.1, and awaits its first real
-`main` run; see [docs/ci-cd.md](docs/ci-cd.md).
+is validated by the pipeline tests, on an isolated Jenkins 2.580.1 and on real `main` builds
+(first `main` #13, approved by the authorized operator, UAT Smoke 4/4); see
+[docs/ci-cd.md](docs/ci-cd.md).
 
 `.github/workflows/playwright.yml` is a secondary GitHub Actions validation; it is not part of the
 Jenkins model and is reviewed with the Git/GitHub integration.
