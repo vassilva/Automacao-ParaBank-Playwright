@@ -119,6 +119,11 @@ const RULES: [RegExp, Impact | 'self', string][] = [
   [/^docs\/|\.md$/, NONE, 'documentation'],
   [/^\.github\//, NONE, 'GitHub workflows and guard configuration'],
   [
+    /^(\.claude\/|\.agents\/|\.codex\/|\.mcp\.json$)/,
+    NONE,
+    'AI agent configuration (never loaded by the tests)',
+  ],
+  [
     /^(\.gitignore|\.prettierignore|\.prettierrc\.json|eslint\.config\.mjs|\.env\.example)$/,
     NONE,
     'lint, format and ignore rules (checked by the Quality Gates)',

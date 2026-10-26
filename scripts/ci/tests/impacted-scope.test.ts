@@ -22,6 +22,20 @@ describe('impacted tests on pull requests', () => {
     assert.equal(deferredToMain(s, 'features'), false);
   });
 
+  it('selects nothing beyond Smoke for AI agent configuration (.claude/, .agents/, .codex/, .mcp.json)', () => {
+    const s = classify('test', [
+      '.claude/hooks/guard.mjs',
+      '.claude/settings.json',
+      '.agents/skills/validate/SKILL.md',
+      '.codex/hooks/guard.mjs',
+      '.codex/hooks.json',
+      '.codex/config.toml',
+      '.mcp.json',
+    ]);
+    assert.equal(s.kind, 'none');
+    assert.deepEqual(s.features, []);
+  });
+
   it('runs the Regression selection on qa/* pushes (scope "all")', () => {
     const s = classify('test', ['src/support/hooks.ts']);
     assert.equal(deferredToMain(s, 'all'), false);
