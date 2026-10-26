@@ -53,5 +53,6 @@ rules of [AGENTS.md](../../../AGENTS.md). Input: a user story, acceptance criter
 - Prove it can fail ([docs/ai/test-quality-gates.md](../../../docs/ai/test-quality-gates.md)
   criterion 6): mutate the expected value locally, run the single scenario
   (`npm test -- features/<file>.feature:<line>`), confirm it fails on the `Then`, revert.
-- Run `/validate` (the human invokes it) or the AGENTS.md validation list, and report real
-  results, the list of reused vs new steps, and the 14-criterion checklist. No commit or push.
+- Run the `validate` skill (the human invokes it: `/validate` in Claude Code, `$validate` in
+  Codex) or the AGENTS.md validation list, and report real results, the list of reused vs new
+  steps, and the 14-criterion checklist. No commit or push.
